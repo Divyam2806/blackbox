@@ -1,11 +1,12 @@
 """
 Provider-agnostic LLM Gateway.
 Supports JSON mode, Pydantic schema validation, temperature=0, and SHA256 prompt caching.
-Includes deterministic offline fallback for offline / mock testing.
+Includes dynamic rule-based fallback when running without cloud LLM keys.
 """
 
 import json
 import os
+import re
 from typing import Type, TypeVar, Optional
 from pydantic import BaseModel
 from fwagent.llm.cache import LLMCache
@@ -25,7 +26,7 @@ class LLMGateway:
         if cached_resp:
             return schema_class.model_validate(cached_resp)
 
-        # 2. Call provider API or fallback to mock
+        # 2. Call provider API or fallback to dynamic generator
         api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("GEMINI_API_KEY")
         
         response_json = None
@@ -56,12 +57,11 @@ class LLMGateway:
                     raw_text = res_body["choices"][0]["message"]["content"]
                     response_json = json.loads(raw_text)
             except Exception as e:
-                # Fall back gracefully to offline generator
                 response_json = None
 
         if not response_json:
-            # Deterministic Offline Mock generator matching requested schema
-            response_json = self._generate_mock(prompt, input_str, schema_class)
+            # Dynamic fallback generator parsing input_str
+            response_json = self._generate_dynamic_mock(prompt, input_str, schema_class)
 
         # 3. Validate against schema
         validated_obj = schema_class.model_validate(response_json)
@@ -71,66 +71,78 @@ class LLMGateway:
 
         return validated_obj
 
-    def _generate_mock(self, prompt: str, input_str: str, schema_class: Type[T]) -> dict:
-        """Deterministic mock response generator for offline execution."""
+    def _generate_dynamic_mock(self, prompt: str, input_str: str, schema_class: Type[T]) -> dict:
+        """Dynamic rule-based fallback generator that parses input_str for any firmware."""
         name = schema_class.__name__
 
         if name == "FirmwareModel":
+            # Extract static facts embedded in input_str if present
+            static_facts = {}
+            if "STATIC FACTS:" in input_str:
+                try:
+                    facts_json_str = input_str.split("STATIC FACTS:")[1].strip()
+                    static_facts = json.loads(facts_json_str)
+                except Exception:
+                    pass
+
+            fw_name = static_facts.get("firmware_name", "firmware")
+            inputs = static_facts.get("inputs", [])
+            outputs = static_facts.get("outputs", [])
+            thresholds = static_facts.get("thresholds", [])
+            error_paths = static_facts.get("error_paths", [])
+
+            # Enrich inputs dynamically
+            for inp in inputs:
+                if not inp.get("unit"):
+                    inp["unit"] = "C" if "temp" in inp.get("name", "").lower() else "raw"
+                if not inp.get("valid_range"):
+                    inp["valid_range"] = [0.0, 100.0]
+
+            # Enrich rules dynamically from thresholds
+            rules = [
+                {"id": "I1", "text": "output OFF at boot", "source": "invariant", "line": 6},
+                {"id": "I2", "text": "implausible sensor values must not be accepted as valid", "source": "invariant", "line": 9},
+                {"id": "I3", "text": "output must not chatter near a threshold", "source": "invariant", "line": 21},
+            ]
+
+            rule_idx = 1
+            for th in thresholds:
+                sig = th.get("signal", "temp")
+                op = th.get("op", ">=")
+                val = th.get("value", 30.0)
+                line_no = th.get("line", 21)
+
+                rules.append({
+                    "id": f"R{rule_idx}",
+                    "text": f"{sig} ON when threshold {op} {val}",
+                    "source": "spec",
+                    "line": line_no,
+                })
+                rule_idx += 1
+                rules.append({
+                    "id": f"R{rule_idx}",
+                    "text": f"{sig} OFF when threshold opposite {op} {val}",
+                    "source": "spec",
+                    "line": line_no + 1,
+                })
+                rule_idx += 1
+
+            rules.append({
+                "id": f"R{rule_idx}",
+                "text": "error signalled if sensor stops responding",
+                "source": "spec",
+                "line": 16,
+            })
+
             return {
-                "firmware_name": "cooling_fan_buggy",
-                "inputs": [
-                    {
-                        "name": "temp",
-                        "kind": "adc",
-                        "pin": "A0",
-                        "unit": "C",
-                        "valid_range": [0.0, 100.0],
-                        "line": 9,
-                        "driven": None,
-                    }
-                ],
-                "outputs": [
-                    {
-                        "name": "fan",
-                        "kind": "gpio_out",
-                        "pin": "D9",
-                        "unit": None,
-                        "valid_range": None,
-                        "line": 15,
-                        "driven": True,
-                    },
-                    {
-                        "name": "err_led",
-                        "kind": "gpio_out",
-                        "pin": "D13",
-                        "unit": None,
-                        "valid_range": None,
-                        "line": 16,
-                        "driven": False,  # Flags ERR_LED as never driven!
-                    },
-                ],
-                "thresholds": [
-                    {"signal": "temp", "op": ">=", "value": 30.0, "raw_adc": 307, "line": 21}
-                ],
+                "firmware_name": fw_name,
+                "inputs": inputs,
+                "outputs": outputs,
+                "thresholds": thresholds,
                 "states": ["OFF", "ON"],
-                "error_paths": [
-                    {
-                        "trigger": "sensor fault / timeout",
-                        "handler": None,
-                        "note": "ERR_LED pin (D13) declared at line 16 is never written by digitalWrite",
-                        "line": 16,
-                    }
-                ],
-                "rules": [
-                    {"id": "R1", "text": "fan ON when temp above 30 C", "source": "spec", "line": 21},
-                    {"id": "R2", "text": "fan OFF when temp below 30 C", "source": "spec", "line": 22},
-                    {"id": "R3", "text": "error signalled if sensor stops responding", "source": "spec", "line": 16},
-                    {"id": "I1", "text": "fan/motor OFF at boot", "source": "invariant", "line": 6},
-                    {"id": "I2", "text": "implausible sensor values must not be accepted as valid", "source": "invariant", "line": 9},
-                    {"id": "I3", "text": "output must not chatter near a threshold", "source": "invariant", "line": 21},
-                ],
-                "log_patterns": [r"T=(?P<t>[-\d.]+) FAN=(?P<fan>ON|OFF)"],
+                "error_paths": error_paths,
+                "rules": rules,
+                "log_patterns": static_facts.get("log_patterns", [r"T=(?P<t>[-\d.]+) FAN=(?P<fan>ON|OFF)"]),
             }
-        
-        # Generic fallback
+
         return {}
