@@ -1,6 +1,6 @@
 """
-Orchestrator: The autonomous testing loop engine (U-P-E-O-J-R-A).
-Coordinates Analyzer, Planner, Executor, Simulator, Evaluator, Explainer, and Reporter.
+Orchestrator: Multi-Round Autonomous Testing Loop Engine (U-P-E-O-J-R-A).
+Coordinates Analyzer, Planner, Executor, Simulator, Evaluator, Explainer, Reporter, and Adaptive Feedback.
 """
 
 import json
@@ -12,16 +12,18 @@ from fwagent.models import FirmwareModel, TestCase, Verdict, Finding, RunConfig
 from fwagent.analyzer.llm_analyzer import LLMAnalyzer
 from fwagent.planner.planner import Planner
 from fwagent.planner.prioritise import Prioritiser
+from fwagent.planner.adaptive import AdaptivePlanner
 from fwagent.simulator.host_hal import HostHALSimulator
 from fwagent.executor import Executor
 from fwagent.evaluator.oracle import OracleEvaluator
 from fwagent.explainer.root_cause import RootCauseExplainer
 from fwagent.reporter.html_reporter import HTMLReporter
+from fwagent.utils.budget import ExecutionBudget
 
 
 class Orchestrator:
     """
-    Autonomous Embedded Firmware Testing Loop (U-P-E-O-J-R-A).
+    Multi-Round Autonomous Embedded Firmware Test Engine.
     """
 
     def __init__(self, config: Optional[RunConfig] = None):
@@ -29,6 +31,7 @@ class Orchestrator:
         self.analyzer = LLMAnalyzer()
         self.planner = Planner()
         self.prioritiser = Prioritiser()
+        self.adaptive_planner = AdaptivePlanner()
         self.simulator = HostHALSimulator()
         self.executor = Executor(self.simulator)
         self.explainer = RootCauseExplainer()
@@ -49,15 +52,14 @@ class Orchestrator:
         print(f"  [+] Input Signals:  {[s.name + ' (' + s.pin + ')' for s in model.inputs]}")
         print(f"  [+] Output Signals: {[s.name + ' (' + s.pin + ')' for s in model.outputs]}")
         print(f"  [+] Thresholds:     {[f'{t.signal} {t.op} {t.value}' for t in model.thresholds]}")
-        print(f"  [+] Error Paths:    {len(model.error_paths)} detected (ERR_LED driven={model.outputs[1].driven if len(model.outputs)>1 else False})")
         print(f"  [+] Invariants:     {len(model.rules)} active rules")
 
-        # 2. STAGE 2: PLAN
+        # 2. STAGE 2: PLAN (Initial Round 1 Test Suite)
         print("\n[STAGE 2/6: PLAN] Generating deterministic BVA, fault, dynamics, and state tests...")
         test_plan: List[TestCase] = self.planner.make_plan(model)
-        print(f"  [+] Generated {len(test_plan)} validated Test Cases across categories.")
+        print(f"  [+] Generated {len(test_plan)} initial Test Cases across categories.")
 
-        # 3. Create Output Directory
+        # Output Directory setup
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         fw_name = os.path.basename(os.path.normpath(firmware_dir))
         if not out_dir:
@@ -65,28 +67,52 @@ class Orchestrator:
         os.makedirs(out_dir, exist_ok=True)
 
         oracle = OracleEvaluator(model)
-        verdicts: List[Verdict] = []
+        budget = ExecutionBudget(max_rounds=2, max_tests=50, timeout_s=60.0)
+
+        all_verdicts: List[Verdict] = []
         all_logs: List[Any] = []
+        current_tests = list(test_plan)
+        round_no = 1
 
-        # 4. STAGE 3 & 4: EXECUTE & OBSERVE & JUDGE
-        print("\n[STAGE 3/6 & 4/6: EXECUTE & OBSERVE & JUDGE] Driving Host-HAL Hardware Simulator...")
-        for tc in test_plan:
-            sim_output = self.executor.run_test(tc)
-            verdict = oracle.judge(tc, sim_output)
-            verdicts.append(verdict)
-            all_logs.extend(sim_output.get("serial_logs", []))
+        # 3. MULTI-ROUND LOOP (Execute -> Observe -> Judge -> Adapt)
+        while True:
+            print(f"\n[ROUND {round_no}] Executing {len(current_tests)} tests on Host-HAL Simulator...")
+            round_verdicts: List[Verdict] = []
 
-        # 5. STAGE 5: ADAPT (Closed-Loop Adaptive Feedback)
-        print("\n[STAGE 5/6: ADAPT] Evaluating findings and triggering adaptive rounds...")
-        fail_count = sum(1 for v in verdicts if v.status == "FAIL")
-        warn_count = sum(1 for v in verdicts if v.status == "WARN")
-        ambig_count = sum(1 for v in verdicts if v.status == "AMBIGUOUS")
-        print(f"  [+] Initial Round Scoreboard: PASS={len(verdicts)-fail_count-warn_count-ambig_count} | FAIL={fail_count} | WARN={warn_count} | AMBIGUOUS={ambig_count}")
+            for tc in current_tests:
+                sim_output = self.executor.run_test(tc)
+                verdict = oracle.judge(tc, sim_output)
+                round_verdicts.append(verdict)
+                all_logs.extend(sim_output.get("serial_logs", []))
 
-        # 6. STAGE 6: REPORT & EXPLAIN
+            all_verdicts.extend(round_verdicts)
+            fail_cnt = sum(1 for v in round_verdicts if v.status == "FAIL")
+            warn_cnt = sum(1 for v in round_verdicts if v.status == "WARN")
+            pass_cnt = sum(1 for v in round_verdicts if v.status == "PASS")
+            print(f"  [+] Round {round_no} Scoreboard: PASS={pass_cnt} | FAIL={fail_cnt} | WARN={warn_cnt}")
+
+            # STAGE 5: ADAPT (Check stop rules & generate follow-up tests)
+            if not budget.should_continue(round_verdicts):
+                print(f"  [+] Adaptive stop rule triggered: Maximum rounds reached or no new information gained. Stopping loop.")
+                break
+
+            follow_up_tests = self.adaptive_planner.generate_adaptive_tests(model, round_verdicts)
+            if not follow_up_tests:
+                print(f"  [+] No adaptive follow-ups required. Stopping loop.")
+                break
+
+            print(f"\n[STAGE 5/6: ADAPT] Round {round_no} generated {len(follow_up_tests)} adaptive follow-up tests (bisection & 3x retries).")
+            current_tests = follow_up_tests
+            round_no += 1
+
+        # Compute trusted ADC window
+        trusted_adc_window = self.adaptive_planner.compute_trusted_adc_window(all_verdicts)
+        print(f"\n[+] Trusted Sensor ADC Count Window: {trusted_adc_window}")
+
+        # 4. STAGE 6: REPORT & EXPLAIN
         print("\n[STAGE 6/6: EXPLAIN & REPORT] Mapping findings to source lines and building HTML report...")
-        findings: List[Finding] = self.explainer.analyze_findings(verdicts, model)
-        report_file = self.reporter.generate_report(fw_name, verdicts, findings, all_logs, out_dir)
+        findings: List[Finding] = self.explainer.analyze_findings(all_verdicts, model)
+        report_file = self.reporter.generate_report(fw_name, all_verdicts, findings, all_logs, out_dir)
 
         model_file = os.path.join(out_dir, "firmware_model.json")
         plan_file = os.path.join(out_dir, "test_plan.json")
@@ -98,7 +124,7 @@ class Orchestrator:
         self.prioritiser.save_test_plan(test_plan, plan_file)
 
         with open(results_file, "w", encoding="utf-8") as f:
-            json.dump([v.model_dump() for v in verdicts], f, indent=2)
+            json.dump([v.model_dump() for v in all_verdicts], f, indent=2)
 
         print(f"\n[+] Artifacts generated successfully:")
         print(f"    - Firmware Model: {model_file}")
@@ -106,31 +132,32 @@ class Orchestrator:
         print(f"    - Execution Results: {results_file}")
         print(f"    - HTML Report:    {report_file}")
 
-        self._print_results_table(verdicts)
-        self._print_findings_summary(findings)
+        self._print_results_table(all_verdicts)
+        self._print_findings_summary(findings, trusted_adc_window)
 
         return {
             "out_dir": out_dir,
             "firmware_model": model,
             "test_plan": test_plan,
-            "verdicts": verdicts,
+            "verdicts": all_verdicts,
             "findings": findings,
+            "trusted_adc_window": trusted_adc_window,
             "report_file": report_file
         }
 
     def _print_results_table(self, verdicts: List[Verdict]):
         print("\n" + "=" * 90)
-        print(f"{'ID':<6} | {'Status':<10} | {'Expected':<35} | {'Observed':<30}")
+        print(f"{'ID':<18} | {'Status':<10} | {'Expected':<30} | {'Observed':<25}")
         print("-" * 90)
         for v in verdicts:
-            exp_str = v.expected[:35] if v.expected else ""
-            obs_str = v.observed[:30] if v.observed else ""
-            print(f"{v.test_id:<6} | {v.status:<10} | {exp_str:<35} | {obs_str:<30}")
+            exp_str = v.expected[:30] if v.expected else ""
+            obs_str = v.observed[:25] if v.observed else ""
+            print(f"{v.test_id:<18} | {v.status:<10} | {exp_str:<30} | {obs_str:<25}")
         print("=" * 90 + "\n")
 
-    def _print_findings_summary(self, findings: List[Finding]):
+    def _print_findings_summary(self, findings: List[Finding], trusted_window: str):
         print("==========================================================================================")
-        print(" HIGH-PRIORITY FINDINGS & LINE-MAPPED ROOT CAUSES")
+        print(f" HIGH-PRIORITY FINDINGS & LINE-MAPPED ROOT CAUSES (Trusted ADC Window: {trusted_window})")
         print("==========================================================================================")
         for f in findings:
             lines_str = ", ".join(str(l) for l in f.likely_cause_lines)

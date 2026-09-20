@@ -20,10 +20,16 @@ class LogParser:
         for t_ms, line in raw_logs:
             parsed_line = False
             for pattern in self.patterns:
-                match = re.search(pattern, line)
+                try:
+                    compiled = re.compile(pattern)
+                except re.error:
+                    continue
+                match = compiled.search(line)
                 if match:
                     group_dict = match.groupdict()
                     for sig_name, val_str in group_dict.items():
+                        if val_str is None:
+                            continue
                         try:
                             val: Any = float(val_str)
                         except ValueError:
@@ -35,7 +41,6 @@ class LogParser:
                             raw_log=line
                         ))
                     parsed_line = True
-                    break
 
             if not parsed_line and line.strip():
                 # Generic raw log capture if pattern didn't match

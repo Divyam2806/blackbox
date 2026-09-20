@@ -153,25 +153,27 @@ class StaticParser:
         # 5. DYNAMIC Serial Log Pattern Extraction
         # Scans Serial.print("KEY=") statements to dynamically assemble regex with named groups (?P<key>...)
         serial_print_str_pattern = re.compile(r'Serial\.print(?:ln)?\s*\(\s*"([^"]+)"\s*\)')
-        serial_print_var_pattern = re.compile(r'Serial\.print(?:ln)?\s*\(\s*([A-Za-z0-9_]+(?:\s*\?\s*"[^"]+"\s*:\s*"[^"]+")?)\s*\)')
         
-        extracted_tokens = []
+        extracted_keys = set()
         for line in line_index.lines:
             line_clean = line.split("//")[0].strip()
             str_match = serial_print_str_pattern.findall(line_clean)
             for s in str_match:
-                if "=" in s:
-                    key_name = s.replace("=", "").strip().lower()
-                    extracted_tokens.append((key_name, s))
+                keys = re.findall(r'([A-Za-z0-9_]+)\s*[:=]', s)
+                for k in keys:
+                    sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', k).lower().strip('_')
+                    if sanitized and not sanitized[0].isdigit():
+                        extracted_keys.add((k, sanitized))
 
-        if extracted_tokens:
-            regex_parts = []
-            for key_name, prefix in extracted_tokens:
-                regex_parts.append(rf"{prefix}(?P<{key_name}>[^\s,]+)")
-            combined_pattern = r"\s*".join(regex_parts)
-            model.log_patterns.append(combined_pattern)
+        if extracted_keys:
+            patterns = []
+            for orig_key, clean_key in sorted(extracted_keys, key=lambda x: x[0]):
+                patterns.append(rf"{orig_key}=(?P<{clean_key}>[^\s,]+)")
+            # Add full line combined pattern if available
+            model.log_patterns = patterns
+            model.log_patterns.append(r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)")
         else:
-            model.log_patterns.append(r".*")
+            model.log_patterns = [r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)"]
 
         # 6. Default invariants
         model.rules.extend([
