@@ -258,24 +258,32 @@ class HostHALSimulator(Simulator):
         for name, pin in self._input_name_to_pin.items():
             if name in sig_lower or sig_lower in name:
                 return pin
-        if "temp" in sig_lower or sig_lower == "a0":
-            return list(self.adc_channels.keys())[0] if self.adc_channels else "A0"
-        return None
+        if self.adc_channels:
+            return list(self.adc_channels.keys())[0]
+        return "A0"
 
     def _to_raw(self, pin_key: str, eng_val: float, sig_lower: str = "") -> float:
         """Convert engineering-unit value to raw ADC count for a channel."""
         unit = self._get_unit(pin_key)
-        if "cm" in unit or "dist" in unit:
-            return max(0.0, min(1023.0, eng_val))   # distance already in cm
+        v_range = self._get_valid_range(pin_key)
+        if "cm" in unit or "dist" in unit or "raw" in unit:
+            return max(0.0, min(1023.0, eng_val))
+        if v_range and v_range[1] > v_range[0]:
+            scale = 1023.0 / (v_range[1] - v_range[0])
+            return max(0.0, min(1023.0, (eng_val - v_range[0]) * scale))
         if eng_val > 100.0:
-            return max(0.0, min(1023.0, eng_val))   # already raw-ish
+            return max(0.0, min(1023.0, eng_val))
         return max(0.0, min(1023.0, eng_val * (1023.0 / 100.0)))
 
     def _to_engineering(self, pin_key: str, raw: float) -> float:
         """Convert raw ADC count to engineering units for a channel."""
         unit = self._get_unit(pin_key)
-        if "cm" in unit or "dist" in unit:
-            return raw   # stored as cm directly
+        v_range = self._get_valid_range(pin_key)
+        if "cm" in unit or "dist" in unit or "raw" in unit:
+            return raw
+        if v_range and v_range[1] > v_range[0]:
+            scale = (v_range[1] - v_range[0]) / 1023.0
+            return v_range[0] + (raw * scale)
         return raw * (100.0 / 1023.0)
 
     def _get_unit(self, pin_key: str) -> str:
@@ -283,8 +291,18 @@ class HostHALSimulator(Simulator):
         if self.model and self.model.inputs:
             for s in self.model.inputs:
                 rpin = str(s.pin) if s.pin is not None else s.name
-                if rpin == pin_key:
+                if rpin == pin_key or s.name.lower() == pin_key.lower():
                     return (s.unit or "").lower()
         return ""
+
+    def _get_valid_range(self, pin_key: str) -> Optional[Tuple[float, float]]:
+        """Return valid_range tuple for an input channel's pin key if present."""
+        if self.model and self.model.inputs:
+            for s in self.model.inputs:
+                rpin = str(s.pin) if s.pin is not None else s.name
+                if rpin == pin_key or s.name.lower() == pin_key.lower():
+                    return s.valid_range
+        return None
+
 
 

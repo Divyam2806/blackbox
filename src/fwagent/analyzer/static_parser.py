@@ -23,31 +23,62 @@ try:
 except Exception:
     _TS_AVAILABLE = False
 
-# Functions classified as firmware INPUT sources
-_INPUT_CALL_FNS = frozenset({
-    "analogRead", "digitalRead", "ping_cm", "sonar_ping_cm",
-    "readTemperature", "readHumidity", "ultrasonic_get_distance",
+# Generic Semantic Pattern Matchers for Embedded Firmware Functions & C++ Objects
+
+_MATH_CALL_FNS = frozenset({
+    "constrain", "map", "abs", "min", "max", "clamp", "round", "floor", "ceil",
+    "sqrt", "pow", "strlen", "strcmp", "memcpy", "memset", "sizeof", "fmod", "atan2"
 })
-# Functions classified as firmware OUTPUT sinks
-_OUTPUT_CALL_FNS = frozenset({
-    "digitalWrite", "analogWrite", "tone", "servo_set_angle",
-})
-# GPIO direction registrations
-_PINMODE_FNS = frozenset({"pinMode"})
-# Sensor object constructors
-_SENSOR_CTOR_FNS = frozenset({"NewPing", "DHT", "Adafruit_BMP280"})
+
+_KNOWN_DIGITAL_KEYWORDS = ("digital", "button", "switch", "pin_in", "state", "ispressed", "toggle")
+
+def _is_output_call(fn_name: str, obj_name: str) -> bool:
+    """Generically infer if a call or object method is driving a hardware output sink."""
+    fn_lower = fn_name.lower()
+    obj_lower = obj_name.lower() if obj_name else ""
+    
+    out_verbs = ("write", "set", "step", "drive", "send", "out", "put", "print", "display", "update", "toggle", "trigger", "spin", "emit", "tone", "attach")
+    if any(v in fn_lower for v in out_verbs):
+        return True
+        
+    out_obj_hints = ("servo", "stepper", "motor", "led", "display", "screen", "pwm", "relay", "valve", "dac", "speaker")
+    if any(h in obj_lower for h in out_obj_hints):
+        return True
+        
+    return False
+
+def _is_input_call(fn_name: str, obj_name: str) -> bool:
+    """Generically infer if a call or object method is sampling a sensor or input hardware."""
+    fn_lower = fn_name.lower()
+    obj_lower = obj_name.lower() if obj_name else ""
+    
+    if fn_lower in _MATH_CALL_FNS:
+        return False
+        
+    in_verbs = ("read", "get", "fetch", "sample", "measure", "poll", "sense", "ping", "check", "input", "scan", "analog")
+    if any(v in fn_lower for v in in_verbs):
+        return True
+        
+    in_obj_hints = ("sensor", "dht", "bmp", "mpu", "adc", "button", "switch", "joystick", "sonar", "ultrasonic")
+    if any(h in obj_lower for h in in_obj_hints):
+        return True
+        
+    return False
+
+
+from fwagent.analyzer.asm_parser import UniversalAsmParser
 
 
 class StaticParser:
     def __init__(self):
-        pass
+        self.asm_parser = UniversalAsmParser()
 
     def parse_directory(self, firmware_dir: str) -> Tuple[FirmwareModel, LineIndex]:
-        # Find main file (.ino, .c, .cpp)
+        # Find main file (.ino, .c, .cpp, .asm, .s, .S, .inc)
         main_file = None
         for root, _, files in os.walk(firmware_dir):
             for file in files:
-                if file.endswith((".ino", ".cpp", ".c")) and not file.startswith("sil_"):
+                if file.endswith((".ino", ".cpp", ".c", ".asm", ".s", ".S", ".inc")) and not file.startswith("sil_"):
                     main_file = os.path.join(root, file)
                     break
             if main_file:
@@ -60,10 +91,16 @@ class StaticParser:
             content = f.read()
 
         line_index = LineIndex(content)
-        model = self.parse_code(content, line_index, firmware_name=os.path.basename(firmware_dir))
+        model = self.parse_code(content, line_index, firmware_name=os.path.basename(firmware_dir), file_path=main_file)
         return model, line_index
 
-    def parse_code(self, content: str, line_index: LineIndex, firmware_name: str = "firmware") -> FirmwareModel:
+    def parse_code(self, content: str, line_index: LineIndex, firmware_name: str = "firmware", file_path: Optional[str] = None) -> FirmwareModel:
+        is_asm_file = file_path and file_path.lower().endswith((".asm", ".s", ".inc"))
+        is_asm_content = any(re.search(rf"\b{op}\b", content, re.IGNORECASE) for op in ("MVI", "LXI", "CPI", "IN", "OUT", "HLT", "NOP"))
+        
+        if is_asm_file or (is_asm_content and not any(kw in content for kw in ("void setup", "int main", "#include"))):
+            return self.asm_parser.parse_code(content, line_index, firmware_name=firmware_name)
+
         if _TS_AVAILABLE:
             try:
                 return self._parse_with_ast(content, line_index, firmware_name)
@@ -117,64 +154,168 @@ class StaticParser:
                 args_node = node.child_by_field_name("arguments")
                 if not fn_node:
                     continue
-                fn_name = fn_node.text.decode("utf-8", errors="ignore").strip()
+                
+                fn_name = ""
+                obj_name = ""
+                method_name = ""
+                if fn_node.type == "field_expression":
+                    arg_n = fn_node.child_by_field_name("argument")
+                    field_n = fn_node.child_by_field_name("field")
+                    if arg_n:
+                        obj_name = arg_n.text.decode("utf-8", errors="ignore").strip()
+                    if field_n:
+                        method_name = field_n.text.decode("utf-8", errors="ignore").strip()
+                    fn_name = method_name
+                else:
+                    fn_name = fn_node.text.decode("utf-8", errors="ignore").strip()
+
                 line_no = node.start_point[0] + 1
                 
-                if fn_name in _INPUT_CALL_FNS:
+                if _is_input_call(fn_name, obj_name):
                     arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()") if args_node else ""
-                    pin_arg = arg_text.split(",")[0].strip()
+                    pin_arg = arg_text.split(",")[0].strip() if arg_text else "input"
                     pin_val = defines.get(pin_arg, (pin_arg, line_no))[0]
                     sig_name = pin_arg.lower().replace("_pin", "")
+                    is_digital = any(kw in fn_name.lower() for kw in _KNOWN_DIGITAL_KEYWORDS)
                     if not any(s.name == sig_name for s in model.inputs):
                         model.inputs.append(
                             Signal(
                                 name=sig_name,
-                                kind="adc",
-                                pin=pin_val if str(pin_val).startswith("A") else f"A{pin_val}",
-                                unit="raw",
-                                valid_range=(0.0, 1023.0),
+                                kind="digital_in" if is_digital else "adc",
+                                pin=pin_val if (str(pin_val).startswith(("A", "D")) or not str(pin_val).isdigit()) else (f"D{pin_val}" if is_digital else f"A{pin_val}"),
+                                unit="binary" if is_digital else "raw",
+                                valid_range=(0.0, 1.0) if is_digital else (0.0, 1023.0),
                                 line=line_no
                             )
                         )
-                elif fn_name in _PINMODE_FNS and args_node:
+                elif fn_name == "pinMode" and args_node:
                     arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()")
                     parts = [p.strip() for p in arg_text.split(",")]
-                    if len(parts) >= 2 and parts[1] == "OUTPUT":
+                    if len(parts) >= 2:
                         pin_arg = parts[0]
                         pin_val = defines.get(pin_arg, (pin_arg, line_no))[0]
                         sig_name = pin_arg.lower().replace("_pin", "")
-                        if not any(s.name == sig_name for s in model.outputs):
+                        if parts[1] == "OUTPUT":
+                            if not any(s.name == sig_name for s in model.outputs):
+                                model.outputs.append(
+                                    Signal(
+                                        name=sig_name,
+                                        kind="gpio_out",
+                                        pin=f"D{pin_val}" if str(pin_val).isdigit() else str(pin_val),
+                                        line=line_no,
+                                        driven=False
+                                    )
+                                )
+                        elif parts[1] in ("INPUT", "INPUT_PULLUP"):
+                            if not any(s.name == sig_name for s in model.inputs):
+                                model.inputs.append(
+                                    Signal(
+                                        name=sig_name,
+                                        kind="digital_in",
+                                        pin=f"D{pin_val}" if str(pin_val).isdigit() else str(pin_val),
+                                        unit="binary",
+                                        valid_range=(0.0, 1.0),
+                                        line=line_no
+                                    )
+                                )
+                elif _is_output_call(fn_name, obj_name):
+                    arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()") if args_node else ""
+                    pin_arg = arg_text.split(",")[0].strip() if arg_text else ""
+                    sig_name = obj_name.lower() if obj_name else (fn_name if (pin_arg.isdigit() or pin_arg.lstrip("-").isdigit()) else pin_arg.lower().replace("_pin", ""))
+                    if sig_name and sig_name != "attach":
+                        driven_pins.add(sig_name)
+                        found = False
+                        for s in model.outputs:
+                            if s.name == sig_name or s.pin == pin_arg:
+                                s.driven = True
+                                found = True
+                        if not found and sig_name:
                             model.outputs.append(
                                 Signal(
                                     name=sig_name,
                                     kind="gpio_out",
-                                    pin=f"D{pin_val}" if str(pin_val).isdigit() else str(pin_val),
+                                    pin=pin_arg or sig_name,
                                     line=line_no,
-                                    driven=False
+                                    driven=True
                                 )
                             )
-                elif fn_name in _OUTPUT_CALL_FNS:
-                    arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()") if args_node else ""
-                    pin_arg = arg_text.split(",")[0].strip()
-                    driven_pins.add(pin_arg)
-                    sig_name = pin_arg.lower().replace("_pin", "")
-                    found = False
-                    for s in model.outputs:
-                        if s.name == sig_name or s.pin == pin_arg:
-                            s.driven = True
-                            found = True
-                    if not found and sig_name:
-                        model.outputs.append(
-                            Signal(
-                                name=sig_name,
-                                kind="gpio_out",
-                                pin=pin_arg,
-                                line=line_no,
-                                driven=True
+                elif any(df in fn_name.lower() for df in ("delay", "sleep", "wait", "pause")) and args_node:
+                    arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()")
+                    try:
+                        delay_val = float(arg_text)
+                        if delay_val >= 10000:
+                            model.error_paths.append(
+                                ErrorPath(
+                                    trigger="blocking delay",
+                                    note=f"Extreme blocking delay({arg_text}) at line {line_no} permanently stalls execution loop",
+                                    line=line_no
+                                )
                             )
-                        )
+                    except ValueError:
+                        if len(arg_text) >= 6 and arg_text.isdigit():
+                            model.error_paths.append(
+                                ErrorPath(
+                                    trigger="blocking delay",
+                                    note=f"Extreme blocking delay({arg_text}) at line {line_no} permanently stalls execution loop",
+                                    line=line_no
+                                )
+                            )
+
+            elif node.type == "assignment_expression":
+                left_node = node.child_by_field_name("left")
+                right_node = node.child_by_field_name("right")
+                if left_node and right_node:
+                    var_name = left_node.text.decode("utf-8", errors="ignore").strip()
+                    line_no = node.start_point[0] + 1
+                    var_lower = var_name.lower()
+                    
+                    is_system_var = (
+                        "time" in var_lower
+                        or "timer" in var_lower
+                        or "millis" in var_lower
+                        or "micros" in var_lower
+                        or "tick" in var_lower
+                        or "stamp" in var_lower
+                        or "pitch" in var_lower
+                        or "trig" in var_lower
+                        or var_lower in ("len", "n", "buf", "msg", "ubrr", "i", "j", "pos", "count")
+                        or var_lower.startswith("pos")
+                    )
+
+                    right_text = right_node.text.decode("utf-8", errors="ignore").strip()
+                    is_timing_fn = any(tf in right_text.lower() for tf in ("millis", "micros", "delay", "mavlink"))
+
+                    if not is_system_var and not is_timing_fn and right_node.type == "call_expression":
+                        r_fn_node = right_node.child_by_field_name("function")
+                        r_fn_name = ""
+                        r_obj_name = ""
+                        if r_fn_node:
+                            if r_fn_node.type == "field_expression":
+                                field_n = r_fn_node.child_by_field_name("field")
+                                arg_n = r_fn_node.child_by_field_name("argument")
+                                if field_n:
+                                    r_fn_name = field_n.text.decode("utf-8", errors="ignore").strip()
+                                if arg_n:
+                                    r_obj_name = arg_n.text.decode("utf-8", errors="ignore").strip()
+                            else:
+                                r_fn_name = r_fn_node.text.decode("utf-8", errors="ignore").strip()
+
+                        if _is_input_call(r_fn_name, r_obj_name) and not any(s.name == var_name for s in model.inputs):
+                            is_digital = any(kw in r_fn_name.lower() for kw in _KNOWN_DIGITAL_KEYWORDS)
+                            is_cm = "ping" in right_text.lower() or "sonar" in right_text.lower() or "dist" in var_lower or "sensor" in var_lower
+                            model.inputs.append(
+                                Signal(
+                                    name=var_name,
+                                    kind="digital_in" if is_digital else "adc",
+                                    pin=var_name.upper(),
+                                    unit="binary" if is_digital else ("cm" if is_cm else "raw"),
+                                    valid_range=(0.0, 1.0) if is_digital else ((1.0, 70.0) if is_cm else (0.0, 1023.0)),
+                                    line=line_no
+                                )
+                            )
 
             elif node.type == "binary_expression":
+                # AST Rule 3: Distinguish loop timeouts & timing checks from domain thresholds
                 op_node = node.child_by_field_name("operator")
                 left_node = node.child_by_field_name("left")
                 right_node = node.child_by_field_name("right")
@@ -184,18 +325,51 @@ class StaticParser:
                         left = left_node.text.decode("utf-8", errors="ignore").strip()
                         right = right_node.text.decode("utf-8", errors="ignore").strip()
                         line_no = node.start_point[0] + 1
-                        val = None
-                        if right in float_constants:
-                            val = float_constants[right][0]
-                        else:
-                            try:
-                                val = float(right)
-                            except ValueError:
-                                pass
-                        if val is not None:
-                            model.thresholds.append(
-                                Threshold(signal=left, op=op, value=val, line=line_no)
+
+                        # Ignore timing comparison checks e.g. (millis() - HeartbeatTime) > 1000
+                        left_lower = left.lower()
+                        is_timing_check = (
+                            "millis" in left_lower
+                            or "micros" in left_lower
+                            or "heartbeattime" in left_lower
+                            or "time" in left_lower
+                            or "timer" in left_lower
+                            or "tick" in left_lower
+                        )
+
+                        # Check if inside loop and has mutation
+                        is_in_loop = False
+                        p = node.parent
+                        while p:
+                            if p.type in ("while_statement", "for_statement", "do_statement"):
+                                is_in_loop = True
+                                break
+                            p = p.parent
+
+                        has_mutation = left_node.type in ("update_expression", "unary_expression") or "++" in left or "--" in left
+
+                        if is_in_loop and has_mutation:
+                            model.error_paths.append(
+                                ErrorPath(
+                                    trigger="I/O loop timeout return 0",
+                                    note=f"Loop timeout at line {line_no} returns failure state",
+                                    line=line_no
+                                )
                             )
+                        elif not is_timing_check:
+                            clean_left = re.sub(r"^[+-]+|[+-]+$", "", left).strip()
+                            val = None
+                            if right in float_constants:
+                                val = float_constants[right][0]
+                            else:
+                                try:
+                                    val = float(right)
+                                except ValueError:
+                                    pass
+                            if val is not None:
+                                model.thresholds.append(
+                                    Threshold(signal=clean_left, op=op, value=val, line=line_no)
+                                )
 
         for sig in model.outputs:
             if sig.pin in driven_pins or sig.name in driven_pins:
@@ -404,9 +578,11 @@ class StaticParser:
             for orig_key, clean_key in sorted(extracted_keys, key=lambda x: x[0]):
                 patterns.append(rf"{orig_key}=(?P<{clean_key}>[^\s,]+)")
             model.log_patterns = patterns
-            model.log_patterns.append(r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)")
         else:
-            model.log_patterns = [r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)"]
+            in_sig = model.inputs[0].name.upper() if model.inputs else "TEMP"
+            out_sig = model.outputs[0].name.upper() if model.outputs else "FAN"
+            model.log_patterns = [rf"{in_sig}=(?P<{in_sig.lower()}>[-\d.]+) {out_sig}=(?P<{out_sig.lower()}>ON|OFF)"]
+
 
         # 6. Default invariants
         model.rules.extend([

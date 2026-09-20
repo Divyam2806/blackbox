@@ -62,7 +62,7 @@ class OracleEvaluator:
 
         # Check Universal Invariant I1 (Boot Safety) for state/boot tests
         if test_case.category == "state" and ("boot" in test_case.title.lower() or "reset" in test_case.title.lower()):
-            boot_ok, boot_msg = self.invariants.check_boot_safety(pin_trace, logs)
+            boot_ok, boot_msg = self.invariants.check_boot_safety(pin_trace, logs, model=self.model)
             if not boot_ok and not has_err_log:
                 return Verdict(
                     test_id=test_id,
@@ -74,9 +74,9 @@ class OracleEvaluator:
                     observed=boot_msg
                 )
 
-        # Check Universal Invariant I3 (Fan Chatter) for timing/chatter tests
+        # Check Universal Invariant I3 (Output Chatter) for timing/chatter tests
         if test_case.category == "timing" or "chatter" in test_case.title.lower() or "noise" in test_case.title.lower():
-            chatter_ok, toggle_count, chatter_msg = self.invariants.check_chatter(logs, max_toggles=3)
+            chatter_ok, toggle_count, chatter_msg = self.invariants.check_chatter(logs, max_toggles=3, model=self.model)
             if not chatter_ok:
                 return Verdict(
                     test_id=test_id,
@@ -91,16 +91,12 @@ class OracleEvaluator:
         # Check Fault Injection & Invariant I2 (Plausible Data & Sensor Disconnect/Faults)
         is_fault_test = (
             test_case.category == "fault"
-            or any("fault" in str(s.action).lower() for s in test_case.steps)
-            or "open circuit" in test_case.title.lower()
-            or "short circuit" in test_case.title.lower()
-            or "frozen" in test_case.title.lower()
-            or "rail extreme raw 0" in test_case.title.lower()
-            or "rail extreme raw 1023" in test_case.title.lower()
+            or any("fault" in str(getattr(s, "action", "")).lower() for s in test_case.steps)
+            or any(k in test_case.title.lower() for k in ("fault", "open circuit", "short circuit", "frozen", "extreme raw"))
         )
 
         if is_fault_test:
-            plausible_ok, plausible_msg = self.invariants.check_plausible_data(test_case, pin_trace, logs)
+            plausible_ok, plausible_msg = self.invariants.check_plausible_data(test_case, pin_trace, logs, model=self.model)
             if not plausible_ok:
                 return Verdict(
                     test_id=test_id,
@@ -123,25 +119,27 @@ class OracleEvaluator:
                 )
 
         # Check Spec-derived expectations (R1 & R2 & explicit Expect items)
+        thresh_val_str = str(self.model.thresholds[0].value) if (self.model and self.model.thresholds) else ""
+
         for expect in test_case.expects:
             kind = expect.kind
-            target = expect.target or "fan"
+            target = expect.target or output_name
             target_val = str(expect.value) if expect.value is not None else ""
 
             if kind == "output_eq":
-                fan_events = [e for e in events if e.signal == target or e.signal == "fan"]
-                if fan_events:
-                    last_fan_val = str(fan_events[-1].value)
-                    if last_fan_val != target_val and not has_err_log:
-                        if "exactly 30.0" in test_case.title.lower() or "30.0" in test_case.rationale:
+                out_events = [e for e in events if e.signal.lower() in (target.lower(), output_name.lower())]
+                if out_events:
+                    last_out_val = str(out_events[-1].value)
+                    if last_out_val != target_val and not has_err_log:
+                        if thresh_val_str and (thresh_val_str in test_case.title.lower() or thresh_val_str in test_case.rationale):
                             return Verdict(
                                 test_id=test_id,
                                 status="AMBIGUOUS",
                                 evidence=evidence,
                                 evidence_chain=evidence_chain,
                                 rule_ids=[expect.rule_id] if expect.rule_id else ["R1"],
-                                expected=f"Spec says 'above 30 C'; code uses '>=' ({target_val})",
-                                observed=f"Observed FAN={last_fan_val} at boundary"
+                                expected=f"Spec boundary difference; code uses '>=' ({target_val})",
+                                observed=f"Observed {target.upper()}={last_out_val} at boundary"
                             )
                         return Verdict(
                             test_id=test_id,
@@ -150,7 +148,7 @@ class OracleEvaluator:
                             evidence_chain=evidence_chain,
                             rule_ids=[expect.rule_id] if expect.rule_id else ["R1"],
                             expected=f"{target.upper()}={target_val} ({expect.rule_id})",
-                            observed=f"Observed {target.upper()}={last_fan_val}"
+                            observed=f"Observed {target.upper()}={last_out_val}"
                         )
             elif kind == "serial_contains":
                 serial_match = any(target_val in line for _, line in logs)
@@ -176,3 +174,4 @@ class OracleEvaluator:
             expected="Observed output matches expected requirement",
             observed=last_log
         )
+

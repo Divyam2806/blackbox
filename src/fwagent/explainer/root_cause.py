@@ -22,7 +22,6 @@ class RootCauseExplainer:
         Analyze list of test verdicts and produce severity-sorted Findings (F1-F4).
         """
         findings: List[Finding] = []
-        verdict_map = {v.test_id: v for v in verdicts}
         localizer = FailureLocalizer()
 
         # Extract dynamic signal & threshold names from model
@@ -39,36 +38,57 @@ class RootCauseExplainer:
         thresh_lines = [t.line for t in model.thresholds if t and t.line] if model else []
         err_lines = [e.line for e in model.error_paths if e and e.line] if model else []
 
-        def get_localized_lines(verdict: Verdict, fallback_lines: List[int]) -> List[int]:
+        def get_localized_lines(verdict: Optional[Verdict], fallback_lines: List[int]) -> List[int]:
             if graph and line_index and verdict:
                 locs = localizer.localize(verdict, model, graph, line_index)
                 if locs:
                     return [l.line for l in locs[:5]]
-            return sorted(list(set(fallback_lines))) or [1, 2, 3]
+            valid = sorted(list(set(fallback_lines)))
+            if valid:
+                return valid
+            if line_index and line_index.lines:
+                return list(range(1, min(6, len(line_index.lines) + 1)))
+            return [1]
 
         # Check input unit & kind for domain-accurate fallback phrasing
         first_input = model.inputs[0] if (model and model.inputs) else None
         is_cm_sensor = first_input and first_input.unit == "cm"
+        has_timeout_error = any("loop timeout" in e.trigger.lower() or "i/o timeout" in e.trigger.lower() for e in (model.error_paths or [])) if model else False
+
+        # Check if firmware is Assembly (.asm / .s) vs C/C++
+        is_asm = False
+        if model:
+            is_asm = any(s.pin and ("Addr_" in str(s.pin) or "Port_" in str(s.pin) or "Reg_" in str(s.pin)) for s in (model.inputs + model.outputs)) or "asm" in model.firmware_name.lower() or model.firmware_name.endswith(".asm")
 
         # Check Finding F1: Sensor Faults / Plausibility Not Detected
         f1_failures = [
             v for v in verdicts
-            if v.status == "FAIL" and ("R3" in v.rule_ids or "I2" in v.rule_ids or "raw" in v.expected.lower() or "fault" in v.expected.lower())
+            if v.status == "FAIL" and ("R3" in v.rule_ids or "I2" in v.rule_ids or "raw" in v.expected.lower() or "fault" in v.expected.lower() or "plausible" in v.expected.lower())
         ]
-        if f1_failures or any(v.status == "FAIL" and ("T07" in v.test_id or "T08" in v.test_id or "T12" in v.test_id or "T01" in v.test_id) for v in verdicts):
-            ev_tests = [v.test_id for v in verdicts if v.status == "FAIL" and ("T07" in v.test_id or "T08" in v.test_id or "T12" in v.test_id or "T01" in v.test_id or "T04" in v.test_id)]
-            first_fail = f1_failures[0] if f1_failures else (verdicts[0] if verdicts else None)
-            dynamic_lines = get_localized_lines(first_fail, input_lines + thresh_lines)
+        if f1_failures:
+            ev_tests = [v.test_id for v in f1_failures]
+            first_fail = f1_failures[0]
+            dynamic_lines = get_localized_lines(first_fail, err_lines + input_lines + thresh_lines)
 
-            if is_cm_sensor:
-                title_str = f"Distance sensor timeout (0 cm) not distinguished from close-range obstacle for {input_name}"
-                cause_str = f"{input_name}.ping_cm() returns 0 on measurement timeout/echo failure, which is processed as 0 cm obstacle distance instead of flagging a sensor failure."
+            if is_asm:
+                title_str = f"Unvalidated input operand {input_name} allows register overflow"
+                cause_str = f"{input_name} loads input data directly into register without CPI boundary limit validation (e.g., operand > 5 causes 8-bit accumulator overflow)."
                 fix_str = (
-                    f"// Distinguish sensor timeout (0 cm) from valid obstacle distance:\n"
-                    f"int dist = {input_name}.ping_cm();\n"
-                    f"if (dist == 0) {{\n"
-                    f"    // Measurement failure / timeout state\n"
-                    f"    return;\n"
+                    f"; Add assembly input validation for {input_name}:\n"
+                    f"CPI  05H         ; Compare accumulator/input with upper bound\n"
+                    f"JNC  OVERFLOW    ; Jump to error handler if input exceeds safe limit"
+                )
+            elif has_timeout_error or is_cm_sensor:
+                title_str = f"Sensor measurement returns 0 on timeout, making failure indistinguishable from 0 reading for {input_name}"
+                cause_str = f"Measurement wait loop returns 0 on timeout (++timeout > 60000), which main loop processes as a valid 0 reading instead of flagging a fault."
+                fix_str = (
+                    f"// 1. Return explicit error sentinel (e.g. 0xFFFF) on timeout:\n"
+                    f"if (++timeout > 60000) return 0xFFFF;\n\n"
+                    f"// 2. Handle error sentinel in main loop:\n"
+                    f"uint16_t val = get_{input_name}();\n"
+                    f"if (val == 0xFFFF) {{\n"
+                    f"    // Trigger error LED or fail-safe state\n"
+                    f"    PORTB |= (1 << LED_PIN);\n"
                     f"}}"
                 )
             else:
@@ -86,8 +106,8 @@ class RootCauseExplainer:
                 id="F1",
                 severity="High",
                 title=title_str,
-                evidence_tests=ev_tests or ["T07", "T08", "T12"],
-                evidence_lines=[f"{', '.join(ev_tests[:3]) or 'T07, T08'}: Unvalidated boundary values accepted for {input_name}"],
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:3])}: Unvalidated boundary values accepted for {input_name}"],
                 firmware_lines=dynamic_lines,
                 likely_cause=cause_str,
                 suggested_fix=fix_str
@@ -96,74 +116,110 @@ class RootCauseExplainer:
         # Check Finding F2: Error Path Unimplemented
         f2_failures = [
             v for v in verdicts
-            if v.status == "FAIL" and ("T16" in v.test_id or "T17" in v.test_id or "ERR" in v.observed or "error" in v.observed.lower())
+            if v.status == "FAIL" and v not in f1_failures and ("ERR" in v.observed or "error" in v.observed.lower() or "fault" in v.observed.lower())
         ]
-        if f2_failures or any(v.status == "FAIL" and ("ERR" in v.observed or "error" in v.observed.lower()) for v in verdicts):
-            ev_tests = [v.test_id for v in verdicts if v.status == "FAIL" and ("T16" in v.test_id or "T17" in v.test_id)]
-            first_fail = f2_failures[0] if f2_failures else (verdicts[0] if verdicts else None)
+        if f2_failures:
+            ev_tests = [v.test_id for v in f2_failures]
+            first_fail = f2_failures[0]
             dynamic_lines = get_localized_lines(first_fail, err_lines + output_lines + thresh_lines)
+            if is_asm:
+                title_str = f"Input fault condition is not explicitly checked on register/port {err_pin}"
+                cause_str = f"Execution on input {input_name} reaches halt without setting status flag or branching to error path."
+                fix_str = (
+                    f"; Check carry/fault flag and branch to error handler:\n"
+                    f"JC   ERROR_HANDLER ; Jump to error handler on carry/fault flag\n"
+                    f"HLT                ; Stop execution safely"
+                )
+            else:
+                title_str = f"Sensor failure is not explicitly detected or reported on {err_pin}"
+                cause_str = f"Measurement failure on {input_name} triggers silent fallback ({output_name}) rather than explicitly reporting a fault state."
+                fix_str = (
+                    f"// Distinguish sensor failure from valid state and report fault:\n"
+                    f"if (is_{input_name}_fault()) {{\n"
+                    f"    // Explicit fail-safe state\n"
+                    f"    {output_name} = SAFE_VALUE;\n"
+                    f"}}"
+                )
             findings.append(Finding(
                 id="F2",
                 severity="High",
-                title=f"Ultrasonic sensor failure is not explicitly detected or reported ({err_pin})",
-                evidence_tests=ev_tests or ["T16", "T17"],
-                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T16, T17'}: Sensor failure returns fallback value without notifying flight controller/operator"],
+                title=title_str,
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:2])}: Hardware processing returns fallback without notifying operator"],
                 firmware_lines=dynamic_lines,
-                likely_cause=f"Measurement failure on {input_name} triggers silent fallback ({output_name} = 1500) rather than explicitly reporting a fault state.",
-                suggested_fix=(
-                    f"// Distinguish sensor failure from valid clearance and report fault state:\n"
-                    f"if (FRONT_SENSOR == 0 && BACK_SENSOR == 0) {{\n"
-                    f"    // Explicit fail-safe state\n"
-                    f"    {output_name} = 1500;\n"
-                    f"}}"
-                )
+                likely_cause=cause_str,
+                suggested_fix=fix_str
             ))
 
         # Check Finding F3: Output Chatter Near Threshold
+        clean_thresh_sig = input_name if ("millis" in thresh_sig.lower() or "time" in thresh_sig.lower() or "timer" in thresh_sig.lower()) else thresh_sig
         f3_warns = [
             v for v in verdicts
             if v.status == "WARN" or "I3" in v.rule_ids or "chattering" in v.observed.lower()
         ]
-        if f3_warns or any(v.status == "WARN" for v in verdicts):
-            ev_tests = [v.test_id for v in verdicts if v.status == "WARN" or "chattering" in v.observed.lower()]
-            first_warn = f3_warns[0] if f3_warns else (verdicts[0] if verdicts else None)
+        if f3_warns:
+            ev_tests = [v.test_id for v in f3_warns]
+            first_warn = f3_warns[0]
             dynamic_lines = get_localized_lines(first_warn, thresh_lines)
-            findings.append(Finding(
-                id="F3",
-                severity="Medium",
-                title=f"{output_name} control instability under noisy sensor input near {thresh_sig}",
-                evidence_tests=ev_tests or ["T13"],
-                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T13'}: Output fluctuations recorded under noisy distance measurements"],
-                firmware_lines=dynamic_lines,
-                likely_cause=f"Direct output calculation from {thresh_sig} without low-pass deadband filtering causes output instability on noisy ultrasonic readings.",
-                suggested_fix=(
+            
+            if is_asm:
+                cause_text = f"Direct output update of {output_name} from {clean_thresh_sig} without hysteresis comparison causes output flag chatter on boundary readings."
+                fix_text = (
+                    f"; Add assembly boundary check for {output_name}:\n"
+                    f"CPI  08H         ; Compare register count with threshold\n"
+                    f"JC   SKIP_UPDATE ; Skip register update if below threshold\n"
+                    f"MOV  A, D        ; Save final output count"
+                )
+            elif is_cm_sensor:
+                cause_text = f"Direct linear calculation of {output_name} from {clean_thresh_sig} without low-pass filtering causes single-sample sensor fluctuations to produce proportional control output jitter."
+                fix_text = (
+                    f"// Apply low-pass exponential moving average filter to {clean_thresh_sig}:\n"
+                    f"static float filtered_{clean_thresh_sig} = {thresh_val};\n"
+                    f"filtered_{clean_thresh_sig} = (filtered_{clean_thresh_sig} * 7 + {clean_thresh_sig} * 3) / 10;\n"
+                    f"// Calculate {output_name} using filtered_{clean_thresh_sig}"
+                )
+            else:
+                cause_text = f"Direct output calculation from {clean_thresh_sig} without low-pass deadband filtering causes output instability on noisy readings."
+                fix_text = (
                     f"// Add deadband filter for {output_name}:\n"
-                    f"if (abs({thresh_sig} - last_{thresh_sig}) > DEADBAND) {{\n"
+                    f"if (abs({clean_thresh_sig} - last_{clean_thresh_sig}) > DEADBAND) {{\n"
                     f"    // Update {output_name}\n"
                     f"}}"
                 )
+
+            findings.append(Finding(
+                id="F3",
+                severity="Medium",
+                title=f"{output_name} is directly sensitive to single-sample sensor fluctuations for {clean_thresh_sig}",
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:2])}: Output fluctuations recorded under noisy sensor readings"],
+                firmware_lines=dynamic_lines,
+                likely_cause=cause_text,
+                suggested_fix=fix_text
             ))
+
 
         # Check Finding F4: Boundary Ambiguity
         f4_ambiguous = [
             v for v in verdicts
             if v.status == "AMBIGUOUS"
         ]
-        if f4_ambiguous or any(v.status == "AMBIGUOUS" for v in verdicts):
-            ev_tests = [v.test_id for v in verdicts if v.status == "AMBIGUOUS"]
-            first_amb = f4_ambiguous[0] if f4_ambiguous else (verdicts[0] if verdicts else None)
+        if f4_ambiguous:
+            ev_tests = [v.test_id for v in f4_ambiguous]
+            first_amb = f4_ambiguous[0]
             dynamic_lines = get_localized_lines(first_amb, thresh_lines)
             findings.append(Finding(
                 id="F4",
                 severity="Info",
                 title=f"Boundary comparison ambiguity for {thresh_sig} at exact value {thresh_val}",
-                evidence_tests=ev_tests or ["T06"],
-                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T06'}: Firmware comparison '{thresh_op}' differs from specification at exact value {thresh_val}"],
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:2])}: Firmware comparison '{thresh_op}' differs from specification at exact value {thresh_val}"],
                 firmware_lines=dynamic_lines,
                 likely_cause=f"Specification and code differ on exact boundary equality behavior at {thresh_val}.",
                 suggested_fix=f"Clarify specification requirement: explicit rule for exact equality at {thresh_val}."
             ))
 
         return findings
+
 
 
