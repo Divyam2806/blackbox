@@ -404,9 +404,11 @@ class StaticParser:
             for orig_key, clean_key in sorted(extracted_keys, key=lambda x: x[0]):
                 patterns.append(rf"{orig_key}=(?P<{clean_key}>[^\s,]+)")
             model.log_patterns = patterns
-            model.log_patterns.append(r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)")
         else:
-            model.log_patterns = [r"T=(?P<temp>[-\d.]+) FAN=(?P<fan>ON|OFF)"]
+            in_sig = model.inputs[0].name.upper() if model.inputs else "TEMP"
+            out_sig = model.outputs[0].name.upper() if model.outputs else "FAN"
+            model.log_patterns = [rf"{in_sig}=(?P<{in_sig.lower()}>[-\d.]+) {out_sig}=(?P<{out_sig.lower()}>ON|OFF)"]
+
 
         # 6. Default invariants
         model.rules.extend([
