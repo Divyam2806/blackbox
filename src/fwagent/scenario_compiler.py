@@ -52,3 +52,60 @@ class ScenarioCompiler:
             compiled_actions.append({"op": "wait", "duration_ms": 1000, "at_ms": 0})
 
         return compiled_actions
+
+    def compile_to_wokwi_yaml(self, test_case: TestCase) -> str:
+        """
+        Compile TestCase steps into valid Wokwi Scenario YAML format.
+        Maps set_input, inject_fault (open_circuit=100.0/raw 1023, short_to_gnd=0.0/raw 0, stuck=frozen), and wait delays.
+        """
+        import yaml
+        steps_list = []
+        last_val = 25.0
+
+        for s in test_case.steps:
+            if s.action == "set_input":
+                try:
+                    val = float(s.value) if s.value is not None else 25.0
+                except (ValueError, TypeError):
+                    val = 25.0
+                # Raw ADC conversion if raw value specified
+                if val > 100.0:
+                    val = val * (100.0 / 1023.0)
+                last_val = val
+                steps_list.append({
+                    "set-control": {
+                        "part-id": "temp1",
+                        "control": "temperature",
+                        "value": round(val, 2)
+                    }
+                })
+            elif s.action == "inject_fault":
+                fault = str(s.value).lower() if s.value else "open_circuit"
+                if "open" in fault or "vcc" in fault or "high" in fault:
+                    fault_val = 100.0  # Rail High raw 1023
+                elif "gnd" in fault or "short" in fault or "low" in fault:
+                    fault_val = 0.0    # Rail Low raw 0
+                else:
+                    fault_val = last_val  # Stuck / frozen
+                steps_list.append({
+                    "set-control": {
+                        "part-id": "temp1",
+                        "control": "temperature",
+                        "value": fault_val
+                    }
+                })
+            elif s.action == "wait":
+                dur_ms = int(s.value) if s.value is not None else 500
+                steps_list.append({"delay": f"{max(100, dur_ms)}ms"})
+
+        if not any("delay" in step for step in steps_list):
+            steps_list.append({"delay": "500ms"})
+
+        scenario_dict = {
+            "name": test_case.id,
+            "version": 1,
+            "author": "FWAgent",
+            "steps": steps_list
+        }
+        return yaml.dump(scenario_dict, sort_keys=False)
+

@@ -100,7 +100,7 @@ class OracleEvaluator:
                 if fan_events:
                     last_fan_val = str(fan_events[-1].value)
                     if last_fan_val != target_val and not has_err_log:
-                        if "exactly 30.0" in test_case.title.lower() or "30.0" in test_case.stimulus:
+                        if "exactly 30.0" in test_case.title.lower() or "30.0" in test_case.rationale:
                             return Verdict(
                                 test_id=test_id,
                                 status="AMBIGUOUS",

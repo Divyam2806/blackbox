@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "author": "Antigravity",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-ntc-temperature-sensor", "id": "temp1", "top": -100, "left": 150, "attrs": {} },
+    { "type": "wokwi-servo", "id": "fan1", "top": 100, "left": 200, "attrs": {} },
+    { "type": "wokwi-led", "id": "err_led", "top": -50, "left": 250, "attrs": { "color": "red" } }
+  ],
+  "connections": [
+    [ "uno:A0", "temp1:OUT", "green", [] ],
+    [ "uno:9", "fan1:PWM", "blue", [] ],
+    [ "uno:13", "err_led:A", "red", [] ],
+    [ "uno:GND.1", "err_led:C", "black", [] ]
+  ]
+}

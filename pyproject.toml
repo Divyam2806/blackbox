@@ -17,3 +17,7 @@ dependencies = [
 
 [project.scripts]
 fwagent = "fwagent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

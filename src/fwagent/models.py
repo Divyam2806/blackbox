@@ -113,10 +113,13 @@ class Verdict(BaseModel):
 class Finding(BaseModel):
     id: str
     severity: Literal["High", "Medium", "Low", "Info"]
-    finding: str
-    evidence: str
-    likely_cause_lines: list[int] = Field(default_factory=list)
+    title: str
+    evidence_tests: list[str] = Field(default_factory=list)
+    evidence_lines: list[str] = Field(default_factory=list)
+    firmware_lines: list[int] = Field(default_factory=list)
+    likely_cause: str = ""
     suggested_fix: str = ""
+
 
 
 class RunConfig(BaseModel):

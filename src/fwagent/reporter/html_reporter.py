@@ -136,6 +136,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div>AMBIGUOUS</div>
                 <div class="number">{{ ambig_count }}</div>
             </div>
+            <div class="card" style="border-color: #38bdf8;">
+                <div style="color: #38bdf8;">RULE COVERAGE</div>
+                <div class="number" style="color: #38bdf8;">{{ rule_coverage_pct }}%</div>
+            </div>
+            <div class="card" style="border-color: #38bdf8;">
+                <div style="color: #38bdf8;">THRESHOLD COVERAGE</div>
+                <div class="number" style="color: #38bdf8;">{{ threshold_coverage_pct }}%</div>
+            </div>
         </div>
 
         <h2>High-Priority Findings & Line-Mapped Root Causes</h2>
@@ -144,7 +152,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <tr>
                     <th>ID</th>
                     <th>Severity</th>
-                    <th>Finding Title & Evidence</th>
+                    <th>Title & Likely Cause</th>
+                    <th>Evidence Tests & Lines</th>
                     <th>Firmware Lines</th>
                     <th>Suggested Fix</th>
                 </tr>
@@ -155,10 +164,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <td><strong>{{ f.id }}</strong></td>
                     <td><span class="badge {{ f.severity.upper() }}">{{ f.severity }}</span></td>
                     <td>
-                        <strong>{{ f.finding }}</strong><br>
-                        <small style="color: #94a3b8;">{{ f.evidence }}</small>
+                        <strong>{{ f.title }}</strong><br>
+                        <small style="color: #94a3b8;">{{ f.likely_cause }}</small>
                     </td>
-                    <td>Lines {{ f.likely_cause_lines | join(', ') }}</td>
+                    <td>
+                        <strong>Tests:</strong> {{ f.evidence_tests | join(', ') }}<br>
+                        <small style="color: #94a3b8;">{{ f.evidence_lines | join('<br>') }}</small>
+                    </td>
+                    <td><span style="background-color: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px; font-weight: bold;">Lines {{ f.firmware_lines | join(', ') }}</span></td>
                     <td><div class="code-box">{{ f.suggested_fix }}</div></td>
                 </tr>
                 {% endfor %}
@@ -166,9 +179,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </table>
 
         {% if chart_file %}
-        <h2>Signal Timeline & Execution Charts</h2>
+        <h2>Signal Timeline & Chatter Execution Chart (T08 / T13 Chatter Analysis)</h2>
         <div class="chart-container">
-            <img src="{{ chart_file }}" alt="Signal Timeline Chart">
+            <img src="{{ chart_file }}" alt="Signal Timeline & Chatter Chart">
         </div>
         {% endif %}
 
@@ -203,7 +216,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 class HTMLReporter:
     """
-    Generates standalone HTML reports with embedded CSS styling and timeline charts.
+    Generates standalone HTML reports with embedded CSS styling, coverage metrics, and chatter charts.
     """
 
     def __init__(self):
@@ -215,7 +228,9 @@ class HTMLReporter:
         verdicts: List[Verdict],
         findings: List[Finding],
         logs: List[Tuple[int, str]],
-        out_dir: str
+        out_dir: str,
+        model: FirmwareModel = None,
+        test_plan: List[TestCase] = None
     ) -> str:
         """Generate HTML report file."""
         os.makedirs(out_dir, exist_ok=True)
@@ -228,6 +243,11 @@ class HTMLReporter:
         warn_count = sum(1 for v in verdicts if v.status == "WARN")
         ambig_count = sum(1 for v in verdicts if v.status == "AMBIGUOUS")
 
+        # Calculate coverage summary
+        from fwagent.evaluator.coverage import CoverageEvaluator
+        cov_eval = CoverageEvaluator()
+        cov_res = cov_eval.calculate_coverage(model, test_plan or [], verdicts)
+
         template = Template(HTML_TEMPLATE)
         html_out = template.render(
             firmware_name=firmware_name,
@@ -236,6 +256,8 @@ class HTMLReporter:
             fail_count=fail_count,
             warn_count=warn_count,
             ambig_count=ambig_count,
+            rule_coverage_pct=cov_res.get("rule_coverage_pct", 100.0),
+            threshold_coverage_pct=cov_res.get("threshold_coverage_pct", 100.0),
             findings=findings,
             verdicts=verdicts,
             chart_file="timeline_chart.png"
@@ -246,3 +268,4 @@ class HTMLReporter:
             f.write(html_out)
 
         return report_file
+
