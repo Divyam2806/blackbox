@@ -28,8 +28,37 @@ class OracleEvaluator:
         evidence: List[str] = [f"[{t_ms}ms] {line}" for t_ms, line in logs[-5:]] if logs else ["No serial logs captured"]
         rule_ids = list(set(e.rule_id for e in test_case.expects if e.rule_id))
 
+        # Build structured evidence chain: gpio snapshots + uart lines
+        evidence_chain: List[dict] = []
+        for entry in pin_trace:
+            t_ms_snap = entry.get("t_ms", 0)
+            for sig_name, state in entry.items():
+                if sig_name == "t_ms":
+                    continue
+                evidence_chain.append({
+                    "ms": t_ms_snap,
+                    "category": "gpio",
+                    "detail": f"{sig_name}={'HIGH' if state else 'LOW'}",
+                    "data": {"signal": sig_name, "state": state},
+                })
+        for ts, line in logs:
+            evidence_chain.append({
+                "ms": ts,
+                "category": "uart",
+                "detail": line,
+                "data": {"line": line},
+            })
+
         has_err_log = any("ERR" in line.upper() or "FAULT" in line.upper() for _, line in logs)
         has_err_pin = any(entry.get("err_pin", 0) == 1 for entry in pin_trace)
+
+        # Derive signal names from model for readable verdict labels
+        output_name = "output"
+        input_name = "sensor"
+        if self.model and self.model.outputs:
+            output_name = self.model.outputs[0].name
+        if self.model and self.model.inputs:
+            input_name = self.model.inputs[0].name
 
         # Check Universal Invariant I1 (Boot Safety) for state/boot tests
         if test_case.category == "state" and ("boot" in test_case.title.lower() or "reset" in test_case.title.lower()):
@@ -39,8 +68,9 @@ class OracleEvaluator:
                     test_id=test_id,
                     status="FAIL",
                     evidence=evidence + [boot_msg],
+                    evidence_chain=evidence_chain,
                     rule_ids=["I1"],
-                    expected="Fan OFF at boot (I1)",
+                    expected=f"{output_name} OFF at boot (I1)",
                     observed=boot_msg
                 )
 
@@ -52,6 +82,7 @@ class OracleEvaluator:
                     test_id=test_id,
                     status="WARN",
                     evidence=evidence + [chatter_msg],
+                    evidence_chain=evidence_chain,
                     rule_ids=["I3"],
                     expected="Stable output near threshold (<= 3 toggles)",
                     observed=f"{toggle_count} toggles in 10s (Chattering detected)"
@@ -75,15 +106,17 @@ class OracleEvaluator:
                     test_id=test_id,
                     status="FAIL",
                     evidence=evidence + [plausible_msg],
+                    evidence_chain=evidence_chain,
                     rule_ids=["R3", "I2"],
                     expected="Error signaled on sensor fault (R3, I2)",
-                    observed="Sensor fault accepted as valid temp; ERR_LED (D13) remains LOW"
+                    observed=f"Sensor fault accepted as valid {input_name} reading; error indicator remains LOW"
                 )
             else:
                 return Verdict(
                     test_id=test_id,
                     status="PASS",
                     evidence=evidence,
+                    evidence_chain=evidence_chain,
                     rule_ids=["R3", "I2"],
                     expected="Error signaled on sensor fault (R3, I2)",
                     observed="Error correctly signaled: " + (logs[-1][1] if logs else "ERR_LED HIGH")
@@ -105,6 +138,7 @@ class OracleEvaluator:
                                 test_id=test_id,
                                 status="AMBIGUOUS",
                                 evidence=evidence,
+                                evidence_chain=evidence_chain,
                                 rule_ids=[expect.rule_id] if expect.rule_id else ["R1"],
                                 expected=f"Spec says 'above 30 C'; code uses '>=' ({target_val})",
                                 observed=f"Observed FAN={last_fan_val} at boundary"
@@ -113,6 +147,7 @@ class OracleEvaluator:
                             test_id=test_id,
                             status="FAIL",
                             evidence=evidence,
+                            evidence_chain=evidence_chain,
                             rule_ids=[expect.rule_id] if expect.rule_id else ["R1"],
                             expected=f"{target.upper()}={target_val} ({expect.rule_id})",
                             observed=f"Observed {target.upper()}={last_fan_val}"
@@ -124,6 +159,7 @@ class OracleEvaluator:
                         test_id=test_id,
                         status="FAIL",
                         evidence=evidence,
+                        evidence_chain=evidence_chain,
                         rule_ids=[expect.rule_id] if expect.rule_id else ["R3"],
                         expected=f"Serial log containing '{target_val}'",
                         observed="No matching serial error log found"
@@ -135,6 +171,7 @@ class OracleEvaluator:
             test_id=test_id,
             status="PASS",
             evidence=evidence,
+            evidence_chain=evidence_chain,
             rule_ids=rule_ids if rule_ids else ["R1"],
             expected="Observed output matches expected requirement",
             observed=last_log

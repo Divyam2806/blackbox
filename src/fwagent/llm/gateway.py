@@ -27,11 +27,53 @@ class LLMGateway:
             return schema_class.model_validate(cached_resp)
 
         # 2. Call provider API or fallback to dynamic generator
-        api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        openai_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
         
         response_json = None
 
-        if api_key and self.provider != "mock":
+        if gemini_key:
+            import time
+            import urllib.request
+            import urllib.error
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            full_prompt = f"{prompt}\n\nUser Input:\n{input_str}\n\nOutput MUST be valid JSON conforming to the requested schema."
+            payload = {
+                "contents": [{"parts": [{"text": full_prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.0,
+                    "responseMimeType": "application/json",
+                },
+            }
+            req_data = json.dumps(payload).encode("utf-8")
+            for attempt in range(3):
+                try:
+                    req = urllib.request.Request(
+                        url,
+                        headers={"Content-Type": "application/json"},
+                        data=req_data,
+                    )
+                    with urllib.request.urlopen(req, timeout=90) as resp:
+                        res_body = json.loads(resp.read().decode("utf-8"))
+                        raw_text = res_body["candidates"][0]["content"]["parts"][0]["text"]
+                        # Extract JSON if wrapped in markdown code fence
+                        if "```" in raw_text:
+                            raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.MULTILINE)
+                            raw_text = re.sub(r"\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
+                        response_json = json.loads(raw_text)
+                        break
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 429 and attempt < 2:
+                        print(f"  [!] Gemini Rate Limit (429). Retrying in 4s (attempt {attempt + 1}/3)...")
+                        time.sleep(4)
+                    else:
+                        print(f"  [!] LLMGateway Gemini HTTP Error: {http_err}")
+                        break
+                except Exception as e:
+                    print(f"  [!] LLMGateway Gemini Error: {e}")
+                    break
+
+        if not response_json and openai_key and self.provider != "mock":
             try:
                 import urllib.request
                 payload = {
@@ -47,11 +89,11 @@ class LLMGateway:
                     "https://api.openai.com/v1/chat/completions",
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
+                        "Authorization": f"Bearer {openai_key}",
                     },
                     data=json.dumps(payload).encode("utf-8"),
                 )
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     res_body = json.loads(resp.read().decode("utf-8"))
                     raw_text = res_body["choices"][0]["message"]["content"]
                     response_json = json.loads(raw_text)

@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field
 
 class Signal(BaseModel):
     name: str
-    kind: Literal["adc", "gpio_in", "gpio_out", "uart", "i2c", "spi", "pwm"]
-    pin: Optional[str] = None
+    kind: str = "adc"
+    pin: Optional[Any] = None
     unit: Optional[str] = None
     valid_range: Optional[tuple[float, float]] = None
     line: Optional[int] = None  # firmware source line number
@@ -25,14 +25,14 @@ class Rule(BaseModel):
 
 class Threshold(BaseModel):
     signal: str
-    op: Literal[">", ">=", "<", "<=", "==", "!="]
+    op: str = "=="
     value: float
     raw_adc: Optional[int] = None
     line: Optional[int] = None
 
 
 class ErrorPath(BaseModel):
-    trigger: str
+    trigger: str = ""
     handler: Optional[str] = None
     note: Optional[str] = None
     line: Optional[int] = None
@@ -43,7 +43,7 @@ class FirmwareModel(BaseModel):
     inputs: list[Signal] = Field(default_factory=list)
     outputs: list[Signal] = Field(default_factory=list)
     thresholds: list[Threshold] = Field(default_factory=list)
-    states: list[str] = Field(default_factory=list)
+    states: list[Any] = Field(default_factory=list)
     error_paths: list[ErrorPath] = Field(default_factory=list)
     rules: list[Rule] = Field(default_factory=list)
     log_patterns: list[str] = Field(default_factory=list)
@@ -82,18 +82,7 @@ class Expect(BaseModel):
 class TestCase(BaseModel):
     id: str
     title: str
-    category: Literal[
-        "normal",
-        "boundary",
-        "abnormal",
-        "fault",
-        "comm",
-        "state",
-        "combo",
-        "timing",
-        "soak",
-        "adaptive",
-    ]
+    category: str = "normal"
     rationale: str
     steps: list[Step] = Field(default_factory=list)
     expects: list[Expect] = Field(default_factory=list)
@@ -104,21 +93,26 @@ class TestCase(BaseModel):
 class Verdict(BaseModel):
     test_id: str
     status: Literal["PASS", "FAIL", "WARN", "AMBIGUOUS", "INCONCLUSIVE", "SKIPPED"]
-    evidence: list[str] = Field(default_factory=list)  # log lines or pin events
+    evidence: list[str] = Field(default_factory=list)          # kept for backward compat
+    evidence_chain: list[dict] = Field(default_factory=list)   # structured: {ms, category, detail, data}
     rule_ids: list[str] = Field(default_factory=list)
     expected: str = ""
     observed: str = ""
 
 
 class Finding(BaseModel):
-    id: str
-    severity: Literal["High", "Medium", "Low", "Info"]
-    title: str
+    id: str = Field(default="F1")
+    severity: str = Field(default="High")
+    title: str = Field(default="")
     evidence_tests: list[str] = Field(default_factory=list)
     evidence_lines: list[str] = Field(default_factory=list)
     firmware_lines: list[int] = Field(default_factory=list)
-    likely_cause: str = ""
-    suggested_fix: str = ""
+    likely_cause: str = Field(default="")
+    suggested_fix: str = Field(default="")
+
+
+class FindingsResponse(BaseModel):
+    findings: list[Finding] = Field(default_factory=list)
 
 
 

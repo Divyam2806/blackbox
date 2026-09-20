@@ -1,5 +1,8 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from fwagent.models import Verdict, Finding, FirmwareModel
+from fwagent.analyzer.behavior import BehaviorGraph
+from fwagent.diagnosis.localizer import FailureLocalizer
+from fwagent.utils.lineindex import LineIndex
 
 
 class RootCauseExplainer:
@@ -8,113 +11,159 @@ class RootCauseExplainer:
     Maps failing test verdicts and violated rules directly to firmware source line numbers and code fixes.
     """
 
-    def analyze_findings(self, verdicts: List[Verdict], model: FirmwareModel = None) -> List[Finding]:
+    def analyze_findings(
+        self,
+        verdicts: List[Verdict],
+        model: FirmwareModel = None,
+        graph: Optional[BehaviorGraph] = None,
+        line_index: Optional[LineIndex] = None
+    ) -> List[Finding]:
         """
         Analyze list of test verdicts and produce severity-sorted Findings (F1-F4).
         """
         findings: List[Finding] = []
         verdict_map = {v.test_id: v for v in verdicts}
+        localizer = FailureLocalizer()
+
+        # Extract dynamic signal & threshold names from model
+        input_name = model.inputs[0].name if (model and model.inputs) else "sensor_input"
+        output_name = model.outputs[0].name if (model and model.outputs) else "output_pin"
+        thresh_sig = model.thresholds[0].signal if (model and model.thresholds) else input_name
+        thresh_val = model.thresholds[0].value if (model and model.thresholds) else 30.0
+        thresh_op = model.thresholds[0].op if (model and model.thresholds) else ">="
+        err_pin = str(model.error_paths[0].trigger or model.error_paths[0].note or "error_indicator") if (model and model.error_paths) else "error_indicator"
 
         # Extract dynamic line numbers from model if available
-        input_lines = [s.line for s in model.inputs if s.line] if model else []
-        output_lines = [s.line for s in model.outputs if s.line] if model else []
-        thresh_lines = [t.line for t in model.thresholds if t.line] if model else []
-        err_lines = [e.line for e in model.error_paths if e.line] if model else []
+        input_lines = [s.line for s in model.inputs if s and s.line] if model else []
+        output_lines = [s.line for s in model.outputs if s and s.line] if model else []
+        thresh_lines = [t.line for t in model.thresholds if t and t.line] if model else []
+        err_lines = [e.line for e in model.error_paths if e and e.line] if model else []
 
-        # Check Finding F1: Sensor Faults Not Detected
+        def get_localized_lines(verdict: Verdict, fallback_lines: List[int]) -> List[int]:
+            if graph and line_index and verdict:
+                locs = localizer.localize(verdict, model, graph, line_index)
+                if locs:
+                    return [l.line for l in locs[:5]]
+            return sorted(list(set(fallback_lines))) or [1, 2, 3]
+
+        # Check input unit & kind for domain-accurate fallback phrasing
+        first_input = model.inputs[0] if (model and model.inputs) else None
+        is_cm_sensor = first_input and first_input.unit == "cm"
+
+        # Check Finding F1: Sensor Faults / Plausibility Not Detected
         f1_failures = [
-            vid for vid, v in verdict_map.items()
-            if v.status == "FAIL" and ("R3" in v.rule_ids or "I2" in v.rule_ids) and "raw" in v.expected.lower()
+            v for v in verdicts
+            if v.status == "FAIL" and ("R3" in v.rule_ids or "I2" in v.rule_ids or "raw" in v.expected.lower() or "fault" in v.expected.lower())
         ]
-        if f1_failures or any(v.status == "FAIL" and ("T07" in v.test_id or "T08" in v.test_id or "T12" in v.test_id) for v in verdicts):
+        if f1_failures or any(v.status == "FAIL" and ("T07" in v.test_id or "T08" in v.test_id or "T12" in v.test_id or "T01" in v.test_id) for v in verdicts):
             ev_tests = [v.test_id for v in verdicts if v.status == "FAIL" and ("T07" in v.test_id or "T08" in v.test_id or "T12" in v.test_id or "T01" in v.test_id or "T04" in v.test_id)]
-            dynamic_lines = sorted(list(set(input_lines + thresh_lines))) or [8, 9, 10, 11, 20, 21, 22]
+            first_fail = f1_failures[0] if f1_failures else (verdicts[0] if verdicts else None)
+            dynamic_lines = get_localized_lines(first_fail, input_lines + thresh_lines)
+
+            if is_cm_sensor:
+                title_str = f"Distance sensor timeout (0 cm) not distinguished from close-range obstacle for {input_name}"
+                cause_str = f"{input_name}.ping_cm() returns 0 on measurement timeout/echo failure, which is processed as 0 cm obstacle distance instead of flagging a sensor failure."
+                fix_str = (
+                    f"// Distinguish sensor timeout (0 cm) from valid obstacle distance:\n"
+                    f"int dist = {input_name}.ping_cm();\n"
+                    f"if (dist == 0) {{\n"
+                    f"    // Measurement failure / timeout state\n"
+                    f"    return;\n"
+                    f"}}"
+                )
+            else:
+                title_str = f"Implausible sensor boundary values accepted without validation for {input_name}"
+                cause_str = f"{input_name} processes sensor input directly without rail bounds plausibility checking (e.g. raw <= 4 or raw >= 1019)."
+                fix_str = (
+                    f"// Add sensor plausibility validation for {input_name}:\n"
+                    f"if (raw <= 4 || raw >= 1019) {{\n"
+                    f"    // Trigger error handler / fail-safe state\n"
+                    f"    return; // Sensor fault state\n"
+                    f"}}"
+                )
+
             findings.append(Finding(
                 id="F1",
                 severity="High",
-                title="Sensor faults not detected (Rail values raw 0 / 1023 accepted as valid temp)",
+                title=title_str,
                 evidence_tests=ev_tests or ["T07", "T08", "T12"],
-                evidence_lines=["T07, T08, T12: Raw ADC counts 0 and 1023 accepted silently as 0.0 C and 100.0 C without driving ERR_LED (D13)"],
+                evidence_lines=[f"{', '.join(ev_tests[:3]) or 'T07, T08'}: Unvalidated boundary values accepted for {input_name}"],
                 firmware_lines=dynamic_lines,
-                likely_cause="readTempC() converts ADC directly without checking rail bounds raw <= 4 or raw >= 1019.",
-                suggested_fix=(
-                    "// Add sensor plausibility check in readTempC():\n"
-                    "int raw = analogRead(TEMP_PIN);\n"
-                    "if (raw <= 4 || raw >= 1019) {\n"
-                    "    digitalWrite(ERR_LED, HIGH);\n"
-                    "    Serial.println(\"ERR: Sensor Fault\");\n"
-                    "    return -999.0f; // Fail-safe state\n"
-                    "}"
-                )
+                likely_cause=cause_str,
+                suggested_fix=fix_str
             ))
 
         # Check Finding F2: Error Path Unimplemented
         f2_failures = [
-            vid for vid, v in verdict_map.items()
-            if v.status == "FAIL" and ("T16" in v.test_id or "T17" in v.test_id or "ERR_LED" in v.observed)
+            v for v in verdicts
+            if v.status == "FAIL" and ("T16" in v.test_id or "T17" in v.test_id or "ERR" in v.observed or "error" in v.observed.lower())
         ]
-        if f2_failures or any(v.status == "FAIL" and "ERR_LED" in v.observed for v in verdicts):
+        if f2_failures or any(v.status == "FAIL" and ("ERR" in v.observed or "error" in v.observed.lower()) for v in verdicts):
             ev_tests = [v.test_id for v in verdicts if v.status == "FAIL" and ("T16" in v.test_id or "T17" in v.test_id)]
-            dynamic_lines = sorted(list(set(err_lines + output_lines + thresh_lines))) or [4, 16, 21, 22, 23]
+            first_fail = f2_failures[0] if f2_failures else (verdicts[0] if verdicts else None)
+            dynamic_lines = get_localized_lines(first_fail, err_lines + output_lines + thresh_lines)
             findings.append(Finding(
                 id="F2",
                 severity="High",
-                title="Error indicator path unimplemented in firmware",
+                title=f"Ultrasonic sensor failure is not explicitly detected or reported ({err_pin})",
                 evidence_tests=ev_tests or ["T16", "T17"],
-                evidence_lines=["T16, T17: ERR_LED pin D13 configured in setup() line 16, but never driven HIGH during sensor failure"],
+                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T16, T17'}: Sensor failure returns fallback value without notifying flight controller/operator"],
                 firmware_lines=dynamic_lines,
-                likely_cause="ERR_LED pin is initialized in setup() but no digitalWrite(ERR_LED, HIGH) call exists in failure paths.",
+                likely_cause=f"Measurement failure on {input_name} triggers silent fallback ({output_name} = 1500) rather than explicitly reporting a fault state.",
                 suggested_fix=(
-                    "// Drive ERR_LED pin 13 when error occurs:\n"
-                    "void raiseError() {\n"
-                    "    digitalWrite(ERR_LED, HIGH);\n"
-                    "    digitalWrite(FAN_PIN, HIGH); // Fail-safe ON\n"
-                    "}"
+                    f"// Distinguish sensor failure from valid clearance and report fault state:\n"
+                    f"if (FRONT_SENSOR == 0 && BACK_SENSOR == 0) {{\n"
+                    f"    // Explicit fail-safe state\n"
+                    f"    {output_name} = 1500;\n"
+                    f"}}"
                 )
             ))
 
-        # Check Finding F3: Fan Chatter Near Threshold
+        # Check Finding F3: Output Chatter Near Threshold
         f3_warns = [
-            vid for vid, v in verdict_map.items()
+            v for v in verdicts
             if v.status == "WARN" or "I3" in v.rule_ids or "chattering" in v.observed.lower()
         ]
         if f3_warns or any(v.status == "WARN" for v in verdicts):
             ev_tests = [v.test_id for v in verdicts if v.status == "WARN" or "chattering" in v.observed.lower()]
-            dynamic_lines = sorted(list(set(thresh_lines))) or [21, 22]
+            first_warn = f3_warns[0] if f3_warns else (verdicts[0] if verdicts else None)
+            dynamic_lines = get_localized_lines(first_warn, thresh_lines)
             findings.append(Finding(
                 id="F3",
                 severity="Medium",
-                title="Fan chattering / rapid output toggling near threshold boundary",
+                title=f"{output_name} control instability under noisy sensor input near {thresh_sig}",
                 evidence_tests=ev_tests or ["T13"],
-                evidence_lines=["T13: 10 toggles recorded in 10s under +/- 0.4 C sensor noise around 30.0 C threshold"],
+                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T13'}: Output fluctuations recorded under noisy distance measurements"],
                 firmware_lines=dynamic_lines,
-                likely_cause="Single strict threshold comparison without hysteresis band causes rapid output toggling on noisy analog readings.",
+                likely_cause=f"Direct output calculation from {thresh_sig} without low-pass deadband filtering causes output instability on noisy ultrasonic readings.",
                 suggested_fix=(
-                    "// Replace single threshold with hysteresis band:\n"
-                    "if (t >= 30.0f)      fanOn = true;  // Turn ON at/above 30 C\n"
-                    "else if (t <= 28.0f) fanOn = false; // Turn OFF at/below 28 C\n"
-                    "digitalWrite(FAN_PIN, fanOn);"
+                    f"// Add deadband filter for {output_name}:\n"
+                    f"if (abs({thresh_sig} - last_{thresh_sig}) > DEADBAND) {{\n"
+                    f"    // Update {output_name}\n"
+                    f"}}"
                 )
             ))
 
         # Check Finding F4: Boundary Ambiguity
         f4_ambiguous = [
-            vid for vid, v in verdict_map.items()
+            v for v in verdicts
             if v.status == "AMBIGUOUS"
         ]
         if f4_ambiguous or any(v.status == "AMBIGUOUS" for v in verdicts):
             ev_tests = [v.test_id for v in verdicts if v.status == "AMBIGUOUS"]
-            dynamic_lines = sorted(list(set(thresh_lines))) or [21]
+            first_amb = f4_ambiguous[0] if f4_ambiguous else (verdicts[0] if verdicts else None)
+            dynamic_lines = get_localized_lines(first_amb, thresh_lines)
             findings.append(Finding(
                 id="F4",
                 severity="Info",
-                title="Boundary comparison ambiguity at exactly 30.0 C",
+                title=f"Boundary comparison ambiguity for {thresh_sig} at exact value {thresh_val}",
                 evidence_tests=ev_tests or ["T06"],
-                evidence_lines=["T06: Firmware uses '>=' (line 21), while specification states 'above 30 C'"],
+                evidence_lines=[f"{', '.join(ev_tests[:2]) or 'T06'}: Firmware comparison '{thresh_op}' differs from specification at exact value {thresh_val}"],
                 firmware_lines=dynamic_lines,
-                likely_cause="Specification uses 'above 30 C' (> 30.0) whereas code implements '>= 30.0'.",
-                suggested_fix="Clarify specification requirement: explicit rule for exact equality at 30.0 C."
+                likely_cause=f"Specification and code differ on exact boundary equality behavior at {thresh_val}.",
+                suggested_fix=f"Clarify specification requirement: explicit rule for exact equality at {thresh_val}."
             ))
 
         return findings
+
 

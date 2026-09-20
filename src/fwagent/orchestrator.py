@@ -10,6 +10,8 @@ from typing import Optional, Dict, Any, List
 
 from fwagent.models import FirmwareModel, TestCase, Verdict, Finding, RunConfig
 from fwagent.analyzer.llm_analyzer import LLMAnalyzer
+from fwagent.analyzer.static_parser import StaticParser
+from fwagent.analyzer.behavior_builder import BehaviorGraphBuilder
 from fwagent.planner.planner import Planner
 from fwagent.planner.prioritise import Prioritiser
 from fwagent.planner.adaptive import AdaptivePlanner
@@ -17,8 +19,10 @@ from fwagent.simulator.host_hal import HostHALSimulator
 from fwagent.executor import Executor
 from fwagent.evaluator.oracle import OracleEvaluator
 from fwagent.explainer.root_cause import RootCauseExplainer
+from fwagent.explainer.gemini_explainer import GeminiExplainer
 from fwagent.reporter.html_reporter import HTMLReporter
 from fwagent.utils.budget import ExecutionBudget
+from fwagent.regression.manager import RegressionManager
 
 
 from fwagent.simulator.wokwi_adapter import WokwiAdapter
@@ -31,6 +35,7 @@ class Orchestrator:
 
     def __init__(self, config: Optional[RunConfig] = None):
         self.config = config or RunConfig(firmware_dir="firmware_samples/cooling_fan_buggy")
+        self.static_parser = StaticParser()
         self.analyzer = LLMAnalyzer()
         self.planner = Planner()
         self.prioritiser = Prioritiser()
@@ -41,7 +46,9 @@ class Orchestrator:
             self.simulator = HostHALSimulator()
         self.executor = Executor(self.simulator)
         self.explainer = RootCauseExplainer()
+        self.gemini_explainer = GeminiExplainer()
         self.reporter = HTMLReporter()
+
 
     def run(self, firmware_dir: str, spec_file: Optional[str] = None, out_dir: Optional[str] = None) -> Dict[str, Any]:
         if self.config.simulator == "wokwi":
@@ -53,19 +60,23 @@ class Orchestrator:
         print(f" Target Firmware: {firmware_dir}")
         print(f"==================================================================\n")
 
-        # 1. STAGE 1: UNDERSTAND
-        print("[STAGE 1/6: UNDERSTAND] Parsing firmware and building Firmware Model...")
-        model: FirmwareModel = self.analyzer.analyze(firmware_dir, spec_file)
-        if hasattr(self.simulator, "set_firmware_type"):
-            self.simulator.set_firmware_type("good" if "good" in firmware_dir.lower() else "buggy")
+        # 1. STAGE 1: UNDERSTAND (Option A: Pure Static Parser Pass - 0 API Calls)
+        print("[STAGE 1/6: UNDERSTAND (STATIC ONLY)] Parsing firmware using StaticParser...")
+        model, line_index = self.static_parser.parse_directory(firmware_dir)
+        behavior_graph = BehaviorGraphBuilder().build(model)
 
-        print(f"  [+] Input Signals:  {[s.name + ' (' + s.pin + ')' for s in model.inputs]}")
-        print(f"  [+] Output Signals: {[s.name + ' (' + s.pin + ')' for s in model.outputs]}")
+        # Reconfigure simulator and executor with the extracted model
+        self.simulator = HostHALSimulator(model=model)
+        self.simulator.set_firmware_type("good" if "good" in firmware_dir.lower() else "buggy")
+        self.executor = Executor(self.simulator, model=model)
+
+        print(f"  [+] Input Signals:  {[s.name + ' (' + str(s.pin or 'var') + ')' for s in model.inputs]}")
+        print(f"  [+] Output Signals: {[s.name + ' (' + str(s.pin or 'var') + ')' for s in model.outputs]}")
         print(f"  [+] Thresholds:     {[f'{t.signal} {t.op} {t.value}' for t in model.thresholds]}")
         print(f"  [+] Invariants:     {len(model.rules)} active rules")
 
-        # 2. STAGE 2: PLAN (Initial Round 1 Test Suite)
-        print("\n[STAGE 2/6: PLAN] Generating deterministic BVA, fault, dynamics, and state tests...")
+        # 2. STAGE 2: PLAN (Option A: Gemini API Creative Test Case Generator - API Call #1)
+        print("\n[STAGE 2/6: PLAN] Generating Test Cases using Gemini API & Deterministic Generators...")
         test_plan: List[TestCase] = self.planner.make_plan(model)
         print(f"  [+] Generated {len(test_plan)} initial Test Cases across categories.")
 
@@ -124,7 +135,41 @@ class Orchestrator:
 
         # 4. STAGE 6: REPORT & EXPLAIN
         print("\n[STAGE 6/6: EXPLAIN & REPORT] Mapping findings to source lines and building HTML report...")
-        findings: List[Finding] = self.explainer.analyze_findings(all_verdicts, model)
+        findings: List[Finding] = []
+
+        # Read spec and source code if available for Gemini API explainer context
+        spec_content = ""
+        fw_code_content = ""
+        spec_path = os.path.join(firmware_dir, "spec.md")
+        if os.path.exists(spec_path):
+            try:
+                with open(spec_path, "r", encoding="utf-8") as f:
+                    spec_content = f.read()
+            except Exception:
+                pass
+
+        src_dir = os.path.join(firmware_dir, "src")
+        if os.path.exists(src_dir):
+            ino_files = [os.path.join(src_dir, f) for f in os.listdir(src_dir) if f.endswith((".ino", ".cpp", ".c"))]
+            if ino_files:
+                try:
+                    with open(ino_files[0], "r", encoding="utf-8") as f:
+                        fw_code_content = f.read()
+                except Exception:
+                    pass
+
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+        if api_key:
+            print("  [+] Querying Gemini API for AI Root Cause & C++ Code Fix Generation...")
+            gemini_findings = self.gemini_explainer.analyze_findings(all_verdicts, model, spec_text=spec_content, firmware_code=fw_code_content)
+            if gemini_findings:
+                findings = gemini_findings
+                print(f"  [+] Gemini API returned {len(findings)} domain-specific findings!")
+
+        if not findings:
+            print("  [+] Running Dynamic Deterministic Root Cause Explainer...")
+            findings = self.explainer.analyze_findings(all_verdicts, model, behavior_graph, line_index)
+
         report_file = self.reporter.generate_report(fw_name, all_verdicts, findings, all_logs, out_dir, model=model, test_plan=test_plan)
 
         model_file = os.path.join(out_dir, "firmware_model.json")
@@ -141,7 +186,20 @@ class Orchestrator:
             json.dump([v.model_dump() for v in all_verdicts], f, indent=2)
 
         with open(findings_file, "w", encoding="utf-8") as f:
-            json.dump([f.model_dump() for f in findings], f, indent=2)
+            json.dump([fi.model_dump() for fi in findings], f, indent=2)
+
+        # Regression check: compare against previous run
+        prev_findings_path = os.path.join("runs", "last_findings.json")
+        regression_report = RegressionManager().compare(findings, prev_findings_path)
+        RegressionManager().print_summary(regression_report)
+
+        # Save current findings as last_findings.json for the next run comparison
+        try:
+            import shutil
+            shutil.copyfile(findings_file, prev_findings_path)
+        except Exception:
+            pass
+
 
         print(f"\n[+] Artifacts generated successfully:")
         print(f"    - Firmware Model:    {model_file}")

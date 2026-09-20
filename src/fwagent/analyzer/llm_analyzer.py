@@ -52,7 +52,7 @@ class LLMAnalyzer:
         # 4. Enforce static line index grounding
         # Verify ERR_LED pin drive status
         for out in enriched_model.outputs:
-            if "ERR" in out.name.upper() or "ERR" in (out.pin or "").upper():
+            if "ERR" in out.name.upper() or "ERR" in str(out.pin or "").upper():
                 out.driven = False
 
         # Ensure unhandled error path is flagged if ERR_LED is never driven
