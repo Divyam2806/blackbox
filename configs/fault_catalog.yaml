@@ -1,0 +1,19 @@
+adc_sensor:
+  - name: open_circuit
+    effect: "value = rail_high (1023)"
+  - name: short_to_gnd
+    effect: "value = 0"
+  - name: short_to_vcc
+    effect: "value = 1023"
+  - name: stuck
+    effect: "value frozen at last reading"
+  - name: glitch
+    effect: "single-sample spike then normal"
+  - name: noise
+    effect: "value +/- delta at sample rate"
+
+power:
+  - name: reset_mid_run
+    effect: "trigger hardware reset"
+  - name: brownout_glitch
+    effect: "supply voltage drop"

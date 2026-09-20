@@ -1,0 +1,13 @@
+invariants:
+  - id: I1
+    text: "Fan/motor MUST be OFF at boot/reset"
+    source: invariant
+  - id: I2
+    text: "Implausible sensor values (raw 0 or 1023) must not be accepted as valid temperature"
+    source: invariant
+  - id: I3
+    text: "Output must not chatter (toggle > 3 times per 5 sec) near a threshold"
+    source: invariant
+  - id: I4
+    text: "Errors must be signalled via error indicator when fault occurs"
+    source: invariant
