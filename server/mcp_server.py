@@ -26,9 +26,9 @@ except ImportError:
     try:
         from mcp.server.fastmcp import FastMCP as MCPServer
     except ImportError:
-        MCPServer = None
+        raise ImportError("The 'mcp' Python package is required. Please install it with 'pip install mcp>=1.0.0'.")
 
-mcp = MCPServer("Gazebo-FWAgent-Server") if MCPServer else None
+mcp = MCPServer("Gazebo-FWAgent-Server")
 
 STATE_FILE = Path(tempfile.gettempdir()) / "gz_mock_state.json"
 
@@ -144,13 +144,15 @@ def get_latest_report_resource() -> str:
 
 if __name__ == "__main__":
     import argparse
+    default_port = int(os.environ.get("PORT", 8001))
     parser = argparse.ArgumentParser(description="BlackBox FW-Agent MCP Server")
     parser.add_argument("--sse", action="store_true", help="Run in HTTP/SSE transport mode for remote agent calls")
     parser.add_argument("--host", default="0.0.0.0", help="Host address for HTTP/SSE server (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8001, help="Port for HTTP/SSE server (default: 8001)")
+    parser.add_argument("--port", type=int, default=default_port, help=f"Port for HTTP/SSE server (default: {default_port})")
     args = parser.parse_args()
 
-    if args.sse:
+    # Auto-detect cloud environment (Render / Heroku / Railway) or explicit --sse flag
+    if args.sse or os.environ.get("RENDER") or "PORT" in os.environ:
         print(f"Starting MCP Server in SSE mode on http://{args.host}:{args.port}/sse ...")
         mcp.run(transport="sse")
     else:
