@@ -121,8 +121,6 @@ uploaded_fw = None
 if sample_choice == "Custom Upload (.ino/.zip)":
     uploaded_fw = st.sidebar.file_uploader("Upload Firmware File (.ino, .c, .cpp, or .zip)", type=["ino", "cpp", "c", "zip"])
 
-uploaded_spec = st.sidebar.file_uploader("Upload Optional spec.md", type=["md"])
-
 board_profile = st.sidebar.selectbox("Board Profile", ["Arduino Uno (ATmega328P)", "ESP32 DevKit", "STM32 Nucleo", "Auto-detect"])
 simulator_choice = st.sidebar.selectbox("Simulation Engine", ["Host-HAL SIL (C++ Software-in-the-Loop)", "Wokwi Simulator (AVR/ESP32 Emulation)"])
 
@@ -156,12 +154,6 @@ if uploaded_fw:
     target_fw_dir = temp_dir
 
 spec_path = None
-if uploaded_spec:
-    spec_temp_dir = os.path.join("runs", "temp_upload")
-    os.makedirs(spec_temp_dir, exist_ok=True)
-    spec_path = os.path.join(spec_temp_dir, "spec.md")
-    with open(spec_path, "wb") as f:
-        f.write(uploaded_spec.getbuffer())
 
 # Active Run Selection
 if "active_run_dir" not in st.session_state:

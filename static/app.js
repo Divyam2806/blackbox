@@ -5,7 +5,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const sampleSelect = document.getElementById('sampleSelect');
     const firmwareFolderInput = document.getElementById('firmwareFolderInput');
     const firmwareZipInput = document.getElementById('firmwareZipInput');
-    const specFileInput = document.getElementById('specFileInput');
     const boardSelect = document.getElementById('boardSelect');
     const simulatorSelect = document.getElementById('simulatorSelect');
     
@@ -154,10 +153,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         } else if (firmwareZipInput.files.length > 0) {
             formData.append('zip_file', firmwareZipInput.files[0]);
-        }
-
-        if (specFileInput.files.length > 0) {
-            formData.append('spec_file', specFileInput.files[0]);
         }
 
         const fwDisplay = sampleVal !== 'custom' ? sampleVal : (firmwareZipInput.files[0]?.name || 'Custom Folder');
