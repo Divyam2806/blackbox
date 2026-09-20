@@ -122,7 +122,7 @@ class StaticParser:
                 
                 if fn_name in _INPUT_CALL_FNS:
                     arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()") if args_node else ""
-                    pin_arg = arg_text.split(",")[0].strip()
+                    pin_arg = arg_text.split(",")[0].strip() if arg_text else "input"
                     pin_val = defines.get(pin_arg, (pin_arg, line_no))[0]
                     sig_name = pin_arg.lower().replace("_pin", "")
                     if not any(s.name == sig_name for s in model.inputs):
@@ -130,7 +130,7 @@ class StaticParser:
                             Signal(
                                 name=sig_name,
                                 kind="adc",
-                                pin=pin_val if str(pin_val).startswith("A") else f"A{pin_val}",
+                                pin=pin_val,
                                 unit="raw",
                                 valid_range=(0.0, 1023.0),
                                 line=line_no
@@ -156,8 +156,8 @@ class StaticParser:
                 elif fn_name in _OUTPUT_CALL_FNS:
                     arg_text = args_node.text.decode("utf-8", errors="ignore").strip("()") if args_node else ""
                     pin_arg = arg_text.split(",")[0].strip()
-                    driven_pins.add(pin_arg)
-                    sig_name = pin_arg.lower().replace("_pin", "")
+                    sig_name = fn_name if (pin_arg.isdigit() or pin_arg.lstrip("-").isdigit()) else pin_arg.lower().replace("_pin", "")
+                    driven_pins.add(sig_name)
                     found = False
                     for s in model.outputs:
                         if s.name == sig_name or s.pin == pin_arg:
@@ -174,7 +174,27 @@ class StaticParser:
                             )
                         )
 
+            elif node.type == "assignment_expression":
+                # AST Rule 1: Assignment left-side receives return value of a function call
+                left_node = node.child_by_field_name("left")
+                right_node = node.child_by_field_name("right")
+                if left_node and right_node and right_node.type == "call_expression":
+                    var_name = left_node.text.decode("utf-8", errors="ignore").strip()
+                    line_no = node.start_point[0] + 1
+                    if not any(s.name == var_name for s in model.inputs):
+                        model.inputs.append(
+                            Signal(
+                                name=var_name,
+                                kind="adc",
+                                pin=var_name.upper(),
+                                unit="raw",
+                                valid_range=(0.0, 1023.0),
+                                line=line_no
+                            )
+                        )
+
             elif node.type == "binary_expression":
+                # AST Rule 3: Distinguish loop timeouts from domain thresholds via AST parent context
                 op_node = node.child_by_field_name("operator")
                 left_node = node.child_by_field_name("left")
                 right_node = node.child_by_field_name("right")
@@ -184,18 +204,41 @@ class StaticParser:
                         left = left_node.text.decode("utf-8", errors="ignore").strip()
                         right = right_node.text.decode("utf-8", errors="ignore").strip()
                         line_no = node.start_point[0] + 1
-                        val = None
-                        if right in float_constants:
-                            val = float_constants[right][0]
-                        else:
-                            try:
-                                val = float(right)
-                            except ValueError:
-                                pass
-                        if val is not None:
-                            model.thresholds.append(
-                                Threshold(signal=left, op=op, value=val, line=line_no)
+
+                        # Check if this expression is inside a while/for loop and contains unary increment/decrement
+                        is_in_loop = False
+                        p = node.parent
+                        while p:
+                            if p.type in ("while_statement", "for_statement", "do_statement"):
+                                is_in_loop = True
+                                break
+                            p = p.parent
+
+                        has_mutation = left_node.type in ("update_expression", "unary_expression") or "++" in left or "--" in left
+
+                        if is_in_loop and has_mutation:
+                            # It's an I/O wait loop timeout! Record as an error path
+                            model.error_paths.append(
+                                ErrorPath(
+                                    trigger="I/O loop timeout return 0",
+                                    note=f"Loop timeout at line {line_no} returns failure state",
+                                    line=line_no
+                                )
                             )
+                        else:
+                            clean_left = re.sub(r"^[+-]+|[+-]+$", "", left).strip()
+                            val = None
+                            if right in float_constants:
+                                val = float_constants[right][0]
+                            else:
+                                try:
+                                    val = float(right)
+                                except ValueError:
+                                    pass
+                            if val is not None:
+                                model.thresholds.append(
+                                    Threshold(signal=clean_left, op=op, value=val, line=line_no)
+                                )
 
         for sig in model.outputs:
             if sig.pin in driven_pins or sig.name in driven_pins:

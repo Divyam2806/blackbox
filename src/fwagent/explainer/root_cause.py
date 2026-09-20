@@ -53,6 +53,7 @@ class RootCauseExplainer:
         # Check input unit & kind for domain-accurate fallback phrasing
         first_input = model.inputs[0] if (model and model.inputs) else None
         is_cm_sensor = first_input and first_input.unit == "cm"
+        has_timeout_error = any("timeout" in e.trigger.lower() or "timeout" in e.note.lower() for e in (model.error_paths or [])) if model else False
 
         # Check Finding F1: Sensor Faults / Plausibility Not Detected
         f1_failures = [
@@ -62,17 +63,19 @@ class RootCauseExplainer:
         if f1_failures:
             ev_tests = [v.test_id for v in f1_failures]
             first_fail = f1_failures[0]
-            dynamic_lines = get_localized_lines(first_fail, input_lines + thresh_lines)
+            dynamic_lines = get_localized_lines(first_fail, err_lines + input_lines + thresh_lines)
 
-            if is_cm_sensor:
-                title_str = f"Distance sensor timeout (0 cm) not distinguished from close-range obstacle for {input_name}"
-                cause_str = f"{input_name} measurement returns 0 on timeout or echo failure, which is processed as 0 cm valid distance instead of flagging a sensor failure."
+            if has_timeout_error or is_cm_sensor:
+                title_str = f"Sensor measurement returns 0 on timeout, making failure indistinguishable from 0 reading for {input_name}"
+                cause_str = f"Measurement wait loop returns 0 on timeout (++timeout > 60000), which main loop processes as a valid 0 reading instead of flagging a fault."
                 fix_str = (
-                    f"// Distinguish sensor timeout (0 cm) from valid obstacle distance:\n"
-                    f"int dist = get_{input_name}_distance();\n"
-                    f"if (dist == 0) {{\n"
-                    f"    // Measurement failure / timeout state\n"
-                    f"    return;\n"
+                    f"// 1. Return explicit error sentinel (e.g. 0xFFFF) on timeout:\n"
+                    f"if (++timeout > 60000) return 0xFFFF;\n\n"
+                    f"// 2. Handle error sentinel in main loop:\n"
+                    f"uint16_t val = get_{input_name}();\n"
+                    f"if (val == 0xFFFF) {{\n"
+                    f"    // Trigger error LED or fail-safe state\n"
+                    f"    PORTB |= (1 << LED_PIN);\n"
                     f"}}"
                 )
             else:
@@ -85,6 +88,7 @@ class RootCauseExplainer:
                     f"    return; // Sensor fault state\n"
                     f"}}"
                 )
+
 
             findings.append(Finding(
                 id="F1",
