@@ -651,16 +651,321 @@ document.addEventListener('DOMContentLoaded', () => {
     errorBanner.classList.remove('hidden');
   }
 
-  function hideError() {
-    errorBanner.classList.add('hidden');
+  // --- Wokwi Interactive Circuit Visualizer & Live Simulation Stats Feature ---
+  const btnOpenWokwiVisualizer = document.getElementById('btnOpenWokwiVisualizer');
+  const wokwiModal = document.getElementById('wokwiModal');
+  const btnCloseWokwiModal = document.getElementById('btnCloseWokwiModal');
+  const btnWokwiToggleSource = document.getElementById('btnWokwiToggleSource');
+  const txtWokwiSourceBtn = document.getElementById('txtWokwiSourceBtn');
+  const wokwiCanvasContainer = document.getElementById('wokwiCanvasContainer');
+  const wokwiSourceView = document.getElementById('wokwiSourceView');
+  const wokwiSourcePre = document.getElementById('wokwiSourcePre');
+  const wokwiModalFwName = document.getElementById('wokwiModalFwName');
+
+  const wokwiCircuitCanvas = document.getElementById('wokwiCircuitCanvas');
+  const wokwiPinStateList = document.getElementById('wokwiPinStateList');
+  const wokwiTempSlider = document.getElementById('wokwiTempSlider');
+  const wokwiSliderVal = document.getElementById('wokwiSliderVal');
+
+  const btnWokwiInjectCut = document.getElementById('btnWokwiInjectCut');
+  const btnWokwiInjectShort = document.getElementById('btnWokwiInjectShort');
+  const btnWokwiResetFault = document.getElementById('btnWokwiResetFault');
+
+  const wokwiStatMcu = document.getElementById('wokwiStatMcu');
+  const wokwiStatClock = document.getElementById('wokwiStatClock');
+  const wokwiStatVcc = document.getElementById('wokwiStatVcc');
+  const wokwiStatCurrent = document.getElementById('wokwiStatCurrent');
+
+  let wokwiAnimId = null;
+  let wokwiTempC = 30.0;
+  let wokwiFault = null;
+  let fanAngle = 0;
+  let showingSource = false;
+
+  if (btnOpenWokwiVisualizer) {
+    btnOpenWokwiVisualizer.addEventListener('click', openWokwiModal);
+  }
+  if (btnCloseWokwiModal) {
+    btnCloseWokwiModal.addEventListener('click', closeWokwiModal);
   }
 
-  function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  if (btnWokwiToggleSource) {
+    btnWokwiToggleSource.addEventListener('click', () => {
+      showingSource = !showingSource;
+      if (showingSource) {
+        wokwiCanvasContainer.classList.add('hidden');
+        wokwiSourceView.classList.remove('hidden');
+        txtWokwiSourceBtn.textContent = 'View Hardware Canvas';
+      } else {
+        wokwiCanvasContainer.classList.remove('hidden');
+        wokwiSourceView.classList.add('hidden');
+        txtWokwiSourceBtn.textContent = 'View diagram.json';
+      }
+    });
+  }
+
+  if (wokwiTempSlider) {
+    wokwiTempSlider.addEventListener('input', (e) => {
+      wokwiTempC = parseFloat(e.target.value);
+      wokwiSliderVal.textContent = `${wokwiTempC.toFixed(1)} °C`;
+    });
+  }
+
+  if (btnWokwiInjectCut) {
+    btnWokwiInjectCut.addEventListener('click', () => {
+      wokwiFault = 'cut';
+    });
+  }
+  if (btnWokwiInjectShort) {
+    btnWokwiInjectShort.addEventListener('click', () => {
+      wokwiFault = 'short';
+    });
+  }
+  if (btnWokwiResetFault) {
+    btnWokwiResetFault.addEventListener('click', () => {
+      wokwiFault = null;
+      wokwiTempC = 30.0;
+      if (wokwiTempSlider) wokwiTempSlider.value = 30;
+      if (wokwiSliderVal) wokwiSliderVal.textContent = '30.0 °C';
+    });
+  }
+
+  async function openWokwiModal() {
+    wokwiModal.classList.remove('hidden');
+    const targetName = sampleSelect.value !== 'custom' ? sampleSelect.value : 'Custom Firmware';
+    wokwiModalFwName.textContent = `${targetName} · ATmega328P (Wokwi Engine)`;
+
+    try {
+      const url = activeRunId ? `/api/wokwi/diagram?run_id=${activeRunId}` : `/api/wokwi/diagram?sample_name=${sampleSelect.value}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        wokwiSourcePre.textContent = JSON.stringify(data.diagram, null, 2);
+        if (data.stats) {
+          wokwiStatMcu.textContent = data.stats.mcu || 'ATmega328P';
+          wokwiStatClock.textContent = data.stats.clock_freq || '16.0 MHz';
+          wokwiStatVcc.textContent = `${data.stats.vcc_voltage?.toFixed(2) || '5.00'} V`;
+          wokwiStatCurrent.textContent = `${data.stats.est_current_ma || 145.2} mA`;
+        }
+      }
+    } catch (e) {
+      console.warn('Wokwi diagram fetch error:', e);
+    }
+
+    startWokwiAnimation();
+  }
+
+  function closeWokwiModal() {
+    wokwiModal.classList.add('hidden');
+    if (wokwiAnimId) cancelAnimationFrame(wokwiAnimId);
+  }
+
+  function startWokwiAnimation() {
+    if (wokwiAnimId) cancelAnimationFrame(wokwiAnimId);
+
+    function loop() {
+      renderWokwiCanvas();
+      wokwiAnimId = requestAnimationFrame(loop);
+    }
+    wokwiAnimId = requestAnimationFrame(loop);
+  }
+
+  function renderWokwiCanvas() {
+    if (!wokwiCircuitCanvas) return;
+    const ctx = wokwiCircuitCanvas.getContext('2d');
+    const w = wokwiCircuitCanvas.width;
+    const h = wokwiCircuitCanvas.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Grid lines
+    ctx.strokeStyle = '#161b22';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < w; x += 20) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    }
+    for (let y = 0; y < h; y += 20) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+
+    // Calculations for Electrical Signals
+    let rawAdc = Math.round(wokwiTempC * 10.23);
+    let voltsA0 = (rawAdc / 1023.0) * 5.0;
+    let faultText = 'NORMAL';
+
+    if (wokwiFault === 'cut') {
+      rawAdc = 1023;
+      voltsA0 = 5.00;
+      faultText = 'FAULT: WIRE CUT (OPEN)';
+    } else if (wokwiFault === 'short') {
+      rawAdc = 0;
+      voltsA0 = 0.00;
+      faultText = 'FAULT: SHORT TO GND';
+    }
+
+    const isError = (wokwiFault !== null) || (wokwiTempC <= 4.0 || wokwiTempC >= 95.0);
+    const fanOn = isError || (wokwiTempC >= 30.0);
+    const errLedOn = isError;
+
+    const voltsD9 = fanOn ? 5.00 : 0.00;
+    const voltsD13 = errLedOn ? 5.00 : 0.00;
+
+    if (fanOn) fanAngle += 0.2;
+
+    // --- DRAWING COMPONENTS ---
+
+    // 1. Arduino Uno Microcontroller Box (Center)
+    const mcuX = 220, mcuY = 100, mcuW = 200, mcuH = 260;
+    ctx.fillStyle = '#005f73';
+    ctx.strokeStyle = '#0A9396';
+    ctx.lineWidth = 2;
+    ctx.fillRect(mcuX, mcuY, mcuW, mcuH);
+    ctx.strokeRect(mcuX, mcuY, mcuW, mcuH);
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 13px "Spline Sans Mono", monospace';
+    ctx.fillText('ARDUINO UNO', mcuX + 45, mcuY + 30);
+    ctx.font = '10px "Spline Sans Mono", monospace';
+    ctx.fillStyle = '#94d2bd';
+    ctx.fillText('ATmega328P MCU', mcuX + 50, mcuY + 45);
+
+    // MCU Main Chip Box
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(mcuX + 50, mcuY + 70, 100, 120);
+    ctx.strokeStyle = '#374151';
+    ctx.strokeRect(mcuX + 50, mcuY + 70, 100, 120);
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '9px monospace';
+    ctx.fillText('MICROCHIP', mcuX + 70, mcuY + 130);
+
+    // Pin Headers
+    // Left Pins: 5V (y=120), GND (y=150), A0 (y=180)
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fillRect(mcuX - 8, mcuY + 20, 8, 12); // 5V
+    ctx.fillRect(mcuX - 8, mcuY + 50, 8, 12); // GND
+    ctx.fillRect(mcuX - 8, mcuY + 180, 8, 12); // A0
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '10px monospace';
+    ctx.fillText('5V', mcuX + 8, mcuY + 30);
+    ctx.fillText('GND', mcuX + 8, mcuY + 60);
+    ctx.fillText('A0', mcuX + 8, mcuY + 190);
+
+    // Right Pins: D9 (y=120), D13 (y=180)
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fillRect(mcuX + mcuW, mcuY + 120, 8, 12); // D9
+    ctx.fillRect(mcuX + mcuW, mcuY + 180, 8, 12); // D13
+
+    ctx.fillText('D9 (PWM)', mcuX + mcuW - 65, mcuY + 130);
+    ctx.fillText('D13 (LED)', mcuX + mcuW - 65, mcuY + 190);
+
+    // 2. Temperature NTC Sensor (Left)
+    const sensX = 40, sensY = 240, sensW = 90, sensH = 90;
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2;
+    ctx.fillRect(sensX, sensY, sensW, sensH);
+    ctx.strokeRect(sensX, sensY, sensW, sensH);
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('NTC SENSOR', sensX + 10, sensY + 20);
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = '11px monospace';
+    ctx.fillText(`${wokwiTempC.toFixed(1)} °C`, sensX + 20, sensY + 45);
+    ctx.font = '9px monospace';
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText(`${voltsA0.toFixed(2)}V (ADC ${rawAdc})`, sensX + 8, sensY + 65);
+
+    // 3. Cooling Fan Actuator (Right Top)
+    const fanX = 480, fanY = 80, fanW = 120, fanH = 120;
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = fanOn ? '#22c55e' : '#475569';
+    ctx.lineWidth = 2;
+    ctx.fillRect(fanX, fanY, fanW, fanH);
+    ctx.strokeRect(fanX, fanY, fanW, fanH);
+
+    ctx.fillStyle = fanOn ? '#22c55e' : '#94a3b8';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText(fanOn ? 'FAN (RUNNING)' : 'FAN (OFF)', fanX + 15, fanY + 20);
+
+    // Fan Blades Animation
+    ctx.save();
+    ctx.translate(fanX + fanW / 2, fanY + 65);
+    ctx.rotate(fanAngle);
+    ctx.fillStyle = fanOn ? '#22c55e' : '#64748b';
+    for (let b = 0; b < 4; b++) {
+      ctx.rotate(Math.PI / 2);
+      ctx.beginPath(); ctx.ellipse(0, 18, 6, 18, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // 4. Error LED + Resistor (Right Bottom)
+    const ledX = 480, ledY = 250, ledW = 120, ledH = 90;
+    ctx.fillStyle = '#1e293b';
+    ctx.strokeStyle = errLedOn ? '#ef4444' : '#475569';
+    ctx.lineWidth = 2;
+    ctx.fillRect(ledX, ledY, ledW, ledH);
+    ctx.strokeRect(ledX, ledY, ledW, ledH);
+
+    ctx.fillStyle = errLedOn ? '#ef4444' : '#94a3b8';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText(errLedOn ? 'ERR LED (HIGH)' : 'ERR LED (LOW)', ledX + 15, ledY + 20);
+
+    // LED Bulb Glowing Effect
+    ctx.fillStyle = errLedOn ? '#ef4444' : '#450a0a';
+    ctx.beginPath(); ctx.arc(ledX + 60, ledY + 55, 16, 0, Math.PI * 2); ctx.fill();
+    if (errLedOn) {
+      ctx.shadowColor = '#ef4444'; ctx.shadowBlur = 15;
+      ctx.beginPath(); ctx.arc(ledX + 60, ledY + 55, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // --- WIRING LINES ---
+
+    // Wire 1: 5V Power (Red)
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sensX + sensW, sensY + 20); ctx.lineTo(mcuX - 8, mcuY + 26); ctx.stroke();
+
+    // Wire 2: GND (Black)
+    ctx.strokeStyle = '#64748b'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(sensX + sensW, sensY + 45); ctx.lineTo(mcuX - 8, mcuY + 56); ctx.stroke();
+
+    // Wire 3: A0 Signal (Green / Dashed if Cut)
+    ctx.strokeStyle = wokwiFault === 'cut' ? '#ef4444' : (wokwiFault === 'short' ? '#f59e0b' : '#22c55e');
+    ctx.lineWidth = 2.5;
+    if (wokwiFault === 'cut') ctx.setLineDash([4, 4]); else ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(sensX + sensW, sensY + 70); ctx.lineTo(mcuX - 8, mcuY + 186); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Wire 4: D9 PWM Drive (Blue)
+    ctx.strokeStyle = fanOn ? '#38bdf8' : '#475569'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(mcuX + mcuW + 8, mcuY + 126); ctx.lineTo(fanX, fanY + 65); ctx.stroke();
+
+    // Wire 5: D13 LED Drive (Orange)
+    ctx.strokeStyle = errLedOn ? '#f97316' : '#475569'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(mcuX + mcuW + 8, mcuY + 186); ctx.lineTo(ledX, ledY + 55); ctx.stroke();
+
+    // Update Telemetry Panel Text
+    if (wokwiPinStateList) {
+      wokwiPinStateList.innerHTML = `
+        <div class="flex items-center justify-between p-1.5 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+          <span>A0 (Analog Sensor)</span>
+          <span class="font-bold ${wokwiFault ? 'text-error' : 'text-secondary'}">${voltsA0.toFixed(2)} V (RAW ${rawAdc})</span>
+        </div>
+        <div class="flex items-center justify-between p-1.5 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+          <span>D9 (Fan PWM Drive)</span>
+          <span class="font-bold ${fanOn ? 'text-secondary' : 'text-on-surface-variant'}">${voltsD9.toFixed(2)} V (${fanOn ? '100% DUTY' : '0% DUTY'})</span>
+        </div>
+        <div class="flex items-center justify-between p-1.5 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+          <span>D13 (Error LED)</span>
+          <span class="font-bold ${errLedOn ? 'text-error' : 'text-on-surface-variant'}">${voltsD13.toFixed(2)} V (${errLedOn ? 'FAULT HIGH' : 'NORMAL LOW'})</span>
+        </div>
+        <div class="mt-1 text-[11px] text-on-surface-variant text-center font-bold">
+          STATUS: <span class="${wokwiFault ? 'text-error' : 'text-secondary'}">${faultText}</span>
+        </div>`;
+    }
   }
 });

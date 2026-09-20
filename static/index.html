@@ -165,10 +165,14 @@
         </div>
       </div>
 
-      <!-- Run Action Button -->
-      <div class="p-space-lg border-b border-outline-variant">
+      <!-- Run Action Button & Wokwi Visualizer -->
+      <div class="p-space-lg border-b border-outline-variant space-y-2">
         <button id="btnRun" class="w-full h-10 bg-primary-container hover:bg-primary text-on-primary rounded-[3px] text-sm font-semibold flex items-center justify-center gap-space-sm transition-colors focus:ring-2 focus:ring-primary focus:outline-none" type="button">
           <span class="material-symbols-outlined text-[18px]">play_arrow</span>Run tests
+        </button>
+        <button id="btnOpenWokwiVisualizer" class="w-full h-9 border border-secondary text-secondary hover:bg-secondary hover:text-on-secondary rounded-[3px] text-xs font-semibold flex items-center justify-center gap-1.5 transition-all" type="button">
+          <span class="material-symbols-outlined text-[16px]">developer_board</span>
+          <span>Wokwi Circuit Visualizer</span>
         </button>
       </div>
 
@@ -498,6 +502,126 @@
 
       </div>
     </main>
+  </div>
+
+  <!-- Wokwi Circuit Visualizer & Live Simulation Stats Modal Screen -->
+  <div id="wokwiModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden flex items-center justify-center p-4">
+    <div class="bg-surface-container-lowest border border-outline-variant rounded-md w-full max-w-[1240px] h-[88vh] flex flex-col shadow-2xl overflow-hidden">
+      
+      <!-- Modal Header -->
+      <div class="h-14 px-6 border-b border-outline-variant bg-surface-container-low flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-3">
+          <span class="material-symbols-outlined text-primary-container text-[24px]">developer_board</span>
+          <div>
+            <h2 class="text-sm font-bold text-on-surface">Wokwi Interactive Hardware Circuit Diagram & Live Simulation Stats</h2>
+            <span id="wokwiModalFwName" class="font-mono text-[11px] text-on-surface-variant">cooling_fan_buggy · ATmega328P</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btnWokwiToggleSource" class="px-2.5 py-1 border border-outline-variant bg-surface text-on-surface hover:bg-surface-container-low text-xs rounded-[3px] font-mono flex items-center gap-1 transition-colors" type="button">
+            <span class="material-symbols-outlined text-[14px]">code</span>
+            <span id="txtWokwiSourceBtn">View diagram.json</span>
+          </button>
+          <button id="btnCloseWokwiModal" class="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-on-surface-variant transition-colors" type="button">
+            <span class="material-symbols-outlined text-[20px]">close</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Modal Main Grid -->
+      <div class="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden bg-surface">
+        
+        <!-- Left Column: Interactive Circuit Diagram Canvas & Source Editor (7 cols) -->
+        <div class="lg:col-span-7 border-r border-outline-variant flex flex-col bg-surface-container-lowest relative overflow-hidden">
+          <!-- Canvas Toolbar -->
+          <div class="h-10 px-4 border-b border-outline-variant bg-surface-container-low flex items-center justify-between text-xs font-mono shrink-0">
+            <div class="flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-secondary animate-pulse"></span>
+              <span class="text-on-surface font-semibold">INTERACTIVE HARDWARE CANVAS</span>
+            </div>
+            <div class="flex items-center gap-3 text-on-surface-variant text-[11px]">
+              <span>Zoom: 100%</span>
+              <span>Grid: 10px</span>
+              <span class="text-secondary font-bold">WOKWI ENGINE LIVE</span>
+            </div>
+          </div>
+
+          <!-- Visual Circuit Canvas Container -->
+          <div id="wokwiCanvasContainer" class="flex-1 relative bg-[#0d1117] p-4 overflow-auto flex items-center justify-center">
+            <canvas id="wokwiCircuitCanvas" width="660" height="460" class="border border-[#21262d] rounded shadow-inner bg-[#0d1117]"></canvas>
+          </div>
+
+          <!-- Raw diagram.json View (Hidden by default) -->
+          <div id="wokwiSourceView" class="hidden flex-1 bg-[#090d16] p-4 font-mono text-xs text-[#38bdf8] overflow-auto select-text">
+            <pre id="wokwiSourcePre" class="m-0"></pre>
+          </div>
+        </div>
+
+        <!-- Right Column: Live Simulation Telemetry & Stats Panel (5 cols) -->
+        <div class="lg:col-span-5 flex flex-col bg-surface-container-lowest overflow-y-auto p-5 space-y-4">
+          
+          <!-- Live MCU & Electrical Power Stats Card -->
+          <div class="border border-outline-variant bg-surface p-4 rounded-[3px] space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-mono text-xs font-bold text-on-surface uppercase">MCU & Power Rail Telemetry</span>
+              <span class="px-2 py-0.5 border border-secondary text-secondary font-mono text-[10px] font-bold rounded-[2px]">60 FPS</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 font-mono text-xs">
+              <div class="p-2 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+                <span class="text-[10px] text-on-surface-variant block uppercase">Microcontroller</span>
+                <span id="wokwiStatMcu" class="font-bold text-on-surface">ATmega328P</span>
+              </div>
+              <div class="p-2 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+                <span class="text-[10px] text-on-surface-variant block uppercase">Clock Speed</span>
+                <span id="wokwiStatClock" class="font-bold text-on-surface">16.0 MHz</span>
+              </div>
+              <div class="p-2 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+                <span class="text-[10px] text-on-surface-variant block uppercase">VCC Supply</span>
+                <span id="wokwiStatVcc" class="font-bold text-secondary">5.00 V</span>
+              </div>
+              <div class="p-2 border border-outline-variant bg-surface-container-lowest rounded-[2px]">
+                <span class="text-[10px] text-on-surface-variant block uppercase">Est. Current Draw</span>
+                <span id="wokwiStatCurrent" class="font-bold text-primary-container">145.2 mA</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Pin State & Voltage Traces -->
+          <div class="border border-outline-variant bg-surface p-4 rounded-[3px] space-y-2">
+            <span class="font-mono text-xs font-bold text-on-surface uppercase block">Active Signal Pins & Logic Traces</span>
+            <div id="wokwiPinStateList" class="space-y-1.5 font-mono text-xs">
+              <!-- Dynamically populated pin voltage status -->
+            </div>
+          </div>
+
+          <!-- Interactive Stimulus Slider & Controls -->
+          <div class="border border-outline-variant bg-surface p-4 rounded-[3px] space-y-3">
+            <span class="font-mono text-xs font-bold text-on-surface uppercase block">Interactive Sensor Stimulus Drive</span>
+            <div class="space-y-1">
+              <div class="flex items-center justify-between font-mono text-xs">
+                <span>Analog Temperature Input (A0):</span>
+                <span id="wokwiSliderVal" class="font-bold text-primary-container">30.0 °C</span>
+              </div>
+              <input type="range" id="wokwiTempSlider" min="0" max="100" value="30" step="0.5" class="w-full accent-primary-container cursor-pointer">
+            </div>
+            
+            <div class="pt-2 border-t border-outline-variant flex gap-2">
+              <button id="btnWokwiInjectCut" class="flex-1 py-1.5 border border-error text-error hover:bg-error hover:text-on-error rounded-[3px] text-xs font-semibold transition-colors" type="button">
+                Wire Cut (Open)
+              </button>
+              <button id="btnWokwiInjectShort" class="flex-1 py-1.5 border border-[#9A6400] text-[#9A6400] hover:bg-[#9A6400] hover:text-white rounded-[3px] text-xs font-semibold transition-colors" type="button">
+                Short to GND
+              </button>
+              <button id="btnWokwiResetFault" class="py-1.5 px-2 border border-outline-variant text-on-surface hover:bg-surface-container-high rounded-[3px] text-xs font-semibold transition-colors" type="button">
+                Reset
+              </button>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
   </div>
 
   <script src="/app.js"></script>
