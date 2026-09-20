@@ -143,4 +143,15 @@ def get_latest_report_resource() -> str:
     return f"Report directory: {latest_run.name}"
 
 if __name__ == "__main__":
-    mcp.run()
+    import argparse
+    parser = argparse.ArgumentParser(description="BlackBox FW-Agent MCP Server")
+    parser.add_argument("--sse", action="store_true", help="Run in HTTP/SSE transport mode for remote agent calls")
+    parser.add_argument("--host", default="0.0.0.0", help="Host address for HTTP/SSE server (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8001, help="Port for HTTP/SSE server (default: 8001)")
+    args = parser.parse_args()
+
+    if args.sse:
+        print(f"Starting MCP Server in SSE mode on http://{args.host}:{args.port}/sse ...")
+        mcp.run(transport="sse")
+    else:
+        mcp.run()

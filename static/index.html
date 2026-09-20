@@ -165,14 +165,12 @@
         </div>
       </div>
 
-      <!-- Run Action Button & Wokwi Visualizer -->
-      <div class="p-space-lg border-b border-outline-variant space-y-2">
         <button id="btnRun" class="w-full h-10 bg-primary-container hover:bg-primary text-on-primary rounded-[3px] text-sm font-semibold flex items-center justify-center gap-space-sm transition-colors focus:ring-2 focus:ring-primary focus:outline-none" type="button">
           <span class="material-symbols-outlined text-[18px]">play_arrow</span>Run tests
         </button>
         <button id="btnOpenWokwiVisualizer" class="w-full h-9 border border-secondary text-secondary hover:bg-secondary hover:text-on-secondary rounded-[3px] text-xs font-semibold flex items-center justify-center gap-1.5 transition-all" type="button">
           <span class="material-symbols-outlined text-[16px]">developer_board</span>
-          <span>Wokwi Circuit Visualizer</span>
+          <span>⚡ Wokwi Circuit Visualizer</span>
         </button>
       </div>
 
@@ -504,7 +502,7 @@
     </main>
   </div>
 
-  <!-- Wokwi Circuit Visualizer & Live Simulation Stats Modal Screen -->
+  <!-- Wokwi Interactive Circuit Visualizer & Live Simulation Stats Modal Screen -->
   <div id="wokwiModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] hidden flex items-center justify-center p-4">
     <div class="bg-surface-container-lowest border border-outline-variant rounded-md w-full max-w-[1240px] h-[88vh] flex flex-col shadow-2xl overflow-hidden">
       
@@ -513,8 +511,8 @@
         <div class="flex items-center gap-3">
           <span class="material-symbols-outlined text-primary-container text-[24px]">developer_board</span>
           <div>
-            <h2 class="text-sm font-bold text-on-surface">Wokwi Interactive Hardware Circuit Diagram & Live Simulation Stats</h2>
-            <span id="wokwiModalFwName" class="font-mono text-[11px] text-on-surface-variant">cooling_fan_buggy · ATmega328P</span>
+            <h2 class="text-sm font-bold text-on-surface">Dynamic Wokwi Circuit Diagram & Simulation Telemetry</h2>
+            <span id="wokwiModalFwName" class="font-mono text-[11px] text-on-surface-variant">Auto-generated hardware model from firmware AST</span>
           </div>
         </div>
         <div class="flex items-center gap-2">
@@ -537,12 +535,11 @@
           <div class="h-10 px-4 border-b border-outline-variant bg-surface-container-low flex items-center justify-between text-xs font-mono shrink-0">
             <div class="flex items-center gap-2">
               <span class="w-2.5 h-2.5 rounded-full bg-secondary animate-pulse"></span>
-              <span class="text-on-surface font-semibold">INTERACTIVE HARDWARE CANVAS</span>
+              <span class="text-on-surface font-semibold">DYNAMIC HARDWARE CANVAS</span>
             </div>
             <div class="flex items-center gap-3 text-on-surface-variant text-[11px]">
               <span>Zoom: 100%</span>
-              <span>Grid: 10px</span>
-              <span class="text-secondary font-bold">WOKWI ENGINE LIVE</span>
+              <span class="text-secondary font-bold">REVERSE-ENGINEERED MODEL</span>
             </div>
           </div>
 
@@ -597,12 +594,14 @@
           <!-- Interactive Stimulus Slider & Controls -->
           <div class="border border-outline-variant bg-surface p-4 rounded-[3px] space-y-3">
             <span class="font-mono text-xs font-bold text-on-surface uppercase block">Interactive Sensor Stimulus Drive</span>
-            <div class="space-y-1">
-              <div class="flex items-center justify-between font-mono text-xs">
-                <span>Analog Temperature Input (A0):</span>
-                <span id="wokwiSliderVal" class="font-bold text-primary-container">30.0 °C</span>
+            <div id="wokwiStimulusContainer" class="space-y-3 font-mono text-xs">
+              <div class="space-y-1">
+                <div class="flex items-center justify-between">
+                  <span id="wokwiSensorLabel">Analog Sensor Input (A0):</span>
+                  <span id="wokwiSliderVal" class="font-bold text-primary-container">30.0 °C</span>
+                </div>
+                <input type="range" id="wokwiTempSlider" min="0" max="100" value="30" step="0.5" class="w-full accent-primary-container cursor-pointer">
               </div>
-              <input type="range" id="wokwiTempSlider" min="0" max="100" value="30" step="0.5" class="w-full accent-primary-container cursor-pointer">
             </div>
             
             <div class="pt-2 border-t border-outline-variant flex gap-2">
