@@ -1,308 +1,349 @@
-from typing import List, Tuple, Dict, Union, Optional
+"""
+Host-HAL simulator (behavioural model).
+
+IMPORTANT: this class does NOT compile or run the firmware. It re-implements
+sensor -> threshold -> output behaviour in Python from the FirmwareModel, and
+`firmware_type` ("good" / "buggy") selects which behaviour is modelled. Findings
+from it therefore describe the MODEL, not your source code. Reports must say so
+(see `executes_real_firmware`). To test real firmware, compile the sketch with
+the C++ shim (hal_shim/) and drive it through a subprocess-based simulator.
+
+Fixes over the earlier version:
+  * available()/capabilities/start() exist, so the factory can use it.
+  * faults come from the shared layer (one implementation, applied once).
+  * inject_fault accepts **kwargs; "uart" no longer maps to the first ADC pin.
+  * time no longer drops the remainder when duration < sample interval.
+  * the buggy model never drives the error output (matches finding F2).
+  * "err"/"fault"/"alarm" name the error output, not any "led".
+  * hysteresis applies in the model path too, not only in the legacy path.
+  * numeric inputs are ambiguous (degrees or counts?). Use "raw:307" or
+    "eng:125" to be explicit; plain numbers keep the old auto rule.
+"""
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 from fwagent.simulator.base import Simulator
+from fwagent.simulator.fault_layer import SharedFaultLayer
+
+_ERR_WORDS = ("err", "fault", "alarm")
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Read a field from a pydantic object or a plain dict."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 class HostHALSimulator(Simulator):
-    """
-    Host-HAL Software-In-the-Loop (SIL) Virtual Hardware Simulator.
-    Model-driven: self-configures from a FirmwareModel extracted by StaticParser.
-    Falls back to cooling-fan defaults when no model is provided.
-    """
+    executes_real_firmware = False
+    independent = True
+    capabilities = {"virtual_time", "fast", "any_board", "behavioural_model"}
+    backend_name = "host"
 
-    def __init__(
-        self,
-        model=None,               # Optional[FirmwareModel]
-        sample_interval_ms: int = 200,
-        firmware_type: str = "buggy",
-    ):
+    def __init__(self, model=None, sample_interval_ms: int = 200,
+                 firmware_type: str = "buggy", adc_full_scale: float = 1023.0,
+                 default_hysteresis: float = 2.0):
         self.model = model
-        self.sample_interval_ms = sample_interval_ms
-        self.firmware_type = firmware_type
-        self.t_ms: int = 0
+        self.sample_interval_ms = max(1, int(sample_interval_ms))
+        self.firmware_type = "good" if "good" in str(firmware_type).lower() else "buggy"
+        self.full_scale = float(adc_full_scale)
+        self.default_hysteresis = float(default_hysteresis)
+        self.faults = SharedFaultLayer(full_scale=self.full_scale)
 
-        # --- Derive ADC channels from model.inputs -------------------------
-        if model and model.inputs:
-            self.adc_channels: Dict[str, float] = {}
-            for s in model.inputs:
-                pin_key = str(s.pin) if s.pin is not None else s.name
-                unit = (s.unit or "").lower()
-                default_raw = 300.0 if ("cm" in unit or "dist" in unit) else 256.0
-                self.adc_channels[pin_key] = default_raw
-        else:
-            self.adc_channels = {"A0": 256.0}   # cooling-fan fallback
-
-        # --- Derive GPIO output registers from model.outputs ---------------
-        if model and model.outputs:
-            self.gpio_outputs: Dict[str, int] = {
-                str(s.pin) if s.pin is not None else s.name: 0
-                for s in model.outputs
-            }
-        else:
-            self.gpio_outputs = {"9": 0, "13": 0}   # fan + err_led fallback
-
-        # --- Name → pin look-up maps ---------------------------------------
+        self.t_ms = 0
+        self._carry_ms = 0
+        self.adc_channels: Dict[str, float] = {}
+        self.gpio_outputs: Dict[str, int] = {}
         self._input_name_to_pin: Dict[str, str] = {}
-        if model and model.inputs:
-            for s in model.inputs:
-                pin_key = str(s.pin) if s.pin is not None else s.name
-                self._input_name_to_pin[s.name.lower()] = pin_key
-
         self._output_name_to_pin: Dict[str, str] = {}
-        if model and model.outputs:
-            for s in model.outputs:
-                pin_key = str(s.pin) if s.pin is not None else s.name
-                self._output_name_to_pin[s.name.lower()] = pin_key
-
-        self.active_faults: Dict[str, str] = {}
-        self.stuck_values: Dict[str, float] = {}
         self.serial_buffer: List[Tuple[int, str]] = []
-        self.glitch_counter: Dict[str, int] = {}
-        self.fan_on_state: bool = False  # legacy state used by oracle checks
+        self.fan_on_state = False
+        self._configure_from_model()
         self.reset()
 
-    # ------------------------------------------------------------------
-    # Simulator interface
-    # ------------------------------------------------------------------
+    # ---- interface -------------------------------------------------------
+    @classmethod
+    def available(cls) -> Tuple[bool, str]:
+        return True, "built-in behavioural model (does not execute compiled firmware)"
+
+    def start(self, artifact_path: Optional[str] = None) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
 
     def set_firmware_type(self, fw_type: str) -> None:
-        self.firmware_type = "good" if "good" in fw_type.lower() else "buggy"
+        self.firmware_type = "good" if "good" in str(fw_type).lower() else "buggy"
+
+    def set_model(self, model) -> None:
+        """Update simulator model and re-configure input/output pin maps."""
+        self.model = model
+        self._configure_from_model()
+        self.reset()
 
     def reset(self) -> None:
         self.t_ms = 0
-        if self.model and self.model.inputs:
-            for s in self.model.inputs:
-                pin_key = str(s.pin) if s.pin is not None else s.name
-                unit = (s.unit or "").lower()
-                self.adc_channels[pin_key] = 300.0 if ("cm" in unit or "dist" in unit) else 256.0
-        else:
-            self.adc_channels = {"A0": 256.0}
+        self._carry_ms = 0
+        for pin in self._inputs_pin_keys():
+            self.adc_channels[pin] = self._default_raw(pin)
         for k in list(self.gpio_outputs):
             self.gpio_outputs[k] = 0
-        self.active_faults.clear()
-        self.stuck_values.clear()
-        self.glitch_counter.clear()
+        self.faults.reset()
         self.serial_buffer.clear()
         self.fan_on_state = False
 
     def set_input(self, signal: str, value: Union[float, int, str]) -> None:
-        sig_lower = str(signal).lower()
-        try:
-            val = float(value)
-        except (ValueError, TypeError):
+        mode, val = self._parse_value(value)
+        if val is None:
             return
-        pin_key = self._resolve_input_pin(sig_lower)
-        if pin_key:
-            self.adc_channels[pin_key] = self._to_raw(pin_key, val, sig_lower)
-        else:
-            self.adc_channels[sig_lower] = val
+        pin = self._resolve_input_pin(str(signal).lower())
+        self.adc_channels[pin] = self._to_raw(pin, val, mode)
 
-    def inject_fault(self, signal: str, fault_type: str, duration_ms: int = 0) -> None:
-        pin = self._resolve_input_pin(str(signal).lower()) or str(signal)
-        self.active_faults[pin] = fault_type
-        if fault_type == "stuck":
-            self.stuck_values[pin] = self.adc_channels.get(pin, 256.0)
-        elif fault_type == "glitch":
-            self.glitch_counter[pin] = 1
+    def inject_fault(self, signal: str, fault_type: str, duration_ms: int = 0, **kwargs) -> None:
+        target = self._fault_target(signal)
+        self.faults.set_fault(target, fault_type, **kwargs)
 
     def clear_fault(self, signal: str) -> None:
-        pin = self._resolve_input_pin(str(signal).lower()) or str(signal)
-        self.active_faults.pop(pin, None)
-        self.stuck_values.pop(pin, None)
+        self.faults.clear_fault(self._fault_target(signal))
 
     def run_for(self, duration_ms: int) -> List[Tuple[int, str]]:
         start_idx = len(self.serial_buffer)
-        steps = max(1, duration_ms // self.sample_interval_ms)
+        total = self._carry_ms + max(0, int(duration_ms))
+        steps, self._carry_ms = divmod(total, self.sample_interval_ms)
         for _ in range(steps):
             self.t_ms += self.sample_interval_ms
             self._step_hardware()
         return self.serial_buffer[start_idx:]
 
     def read_pin(self, pin: str) -> int:
-        pin_clean = str(pin).replace("D", "").replace("d", "")
-        return self.gpio_outputs.get(pin_clean, self.gpio_outputs.get(pin_clean.lstrip("0"), 0))
+        p = str(pin).replace("D", "").replace("d", "")
+        return self.gpio_outputs.get(p, self.gpio_outputs.get(p.lstrip("0"), 0))
 
     def read_serial(self) -> List[Tuple[int, str]]:
         return list(self.serial_buffer)
 
-    # ------------------------------------------------------------------
-    # Internal simulation step
-    # ------------------------------------------------------------------
+    # ---- configuration ---------------------------------------------------
+    def _model_inputs(self) -> list:
+        return list(_get(self.model, "inputs", None) or [])
 
-    def _step_hardware(self) -> None:
-        uart_silenced = self.active_faults.get("uart") == "silence"
+    def _model_outputs(self) -> list:
+        return list(_get(self.model, "outputs", None) or [])
 
-        if self.model and self.model.inputs:
-            # ---- Generic model-driven path --------------------------------
-            readings: Dict[str, float] = {
-                pin_key: self._apply_fault(pin_key)
-                for pin_key in self.adc_channels
-            }
+    @staticmethod
+    def _pin_key(sig) -> str:
+        pin = _get(sig, "pin")
+        return str(pin) if pin is not None else str(_get(sig, "name", ""))
 
-            # Check for rail / implausible values across all input channels
-            error_detected = False
-            for s in self.model.inputs:
-                pin_key = str(s.pin) if s.pin is not None else s.name
-                raw = readings.get(pin_key, 256.0)
-                if s.valid_range:
-                    lo_raw = self._to_raw(pin_key, s.valid_range[0], s.name.lower())
-                    hi_raw = self._to_raw(pin_key, s.valid_range[1], s.name.lower())
-                    if raw <= lo_raw + 4 or raw >= hi_raw - 4:
-                        error_detected = True
-                else:
-                    # Fallback: ADC rail detection
-                    if raw <= 4 or raw >= 1019:
-                        error_detected = True
+    def _inputs_pin_keys(self) -> List[str]:
+        keys = [self._pin_key(s) for s in self._model_inputs()]
+        return keys or ["A0"]
 
-            # Evaluate thresholds and drive output pins
-            output_states: Dict[str, int] = {}
-            for th in (self.model.thresholds or []):
-                pin_key = self._resolve_input_pin(th.signal.lower()) or th.signal
-                raw = readings.get(pin_key, 256.0)
-                eng_val = self._to_engineering(pin_key, raw)
-                op, tval = th.op, th.value
-                triggered = (
-                    (op in (">=", "=>") and eng_val >= tval) or
-                    (op in ("<=", "=<") and eng_val <= tval) or
-                    (op == ">"  and eng_val > tval) or
-                    (op == "<"  and eng_val < tval) or
-                    (op == "==" and eng_val == tval)
-                )
-                for out in (self.model.outputs or []):
-                    out_pin = str(out.pin) if out.pin is not None else out.name
-                    name_lower = out.name.lower()
-                    if "err" in name_lower or "led" in name_lower:
-                        output_states[out_pin] = 1 if error_detected else 0
-                    else:
-                        if self.firmware_type == "good":
-                            if error_detected:
-                                output_states[out_pin] = 1   # fail-safe ON
-                            else:
-                                if triggered:
-                                    self.fan_on_state = True
-                                elif not triggered:
-                                    self.fan_on_state = False
-                                output_states[out_pin] = 1 if self.fan_on_state else 0
-                        else:
-                            output_states[out_pin] = 1 if triggered else 0
-
-            self.gpio_outputs.update(output_states)
-
-            # Emit serial log
-            if not uart_silenced:
-                if error_detected and self.firmware_type == "good":
-                    self.serial_buffer.append((self.t_ms, "ERR: Sensor Fault"))
-                else:
-                    parts = []
-                    for s in self.model.inputs:
-                        pin_key = str(s.pin) if s.pin is not None else s.name
-                        eng_val = self._to_engineering(pin_key, readings.get(pin_key, 256.0))
-                        parts.append(f"{s.name.upper()}={eng_val:.2f}")
-                    for s in self.model.outputs:
-                        out_pin = str(s.pin) if s.pin is not None else s.name
-                        state = self.gpio_outputs.get(out_pin, 0)
-                        parts.append(f"{s.name.upper()}={'ON' if state else 'OFF'}")
-                    if parts:
-                        self.serial_buffer.append((self.t_ms, " ".join(parts)))
-
+    def _configure_from_model(self) -> None:
+        self._input_name_to_pin.clear()
+        self._output_name_to_pin.clear()
+        for s in self._model_inputs():
+            self._input_name_to_pin[str(_get(s, "name", "")).lower()] = self._pin_key(s)
+        outs = self._model_outputs()
+        if outs:
+            for s in outs:
+                self.gpio_outputs[self._pin_key(s)] = 0
+                self._output_name_to_pin[str(_get(s, "name", "")).lower()] = self._pin_key(s)
         else:
-            # ---- Legacy hardcoded cooling-fan path (no model) -------------
-            raw_adc = self._apply_fault("A0")
-            if self.firmware_type == "good":
-                is_error = raw_adc <= 4 or raw_adc >= 1019
-                if is_error:
-                    self.gpio_outputs["13"] = 1
-                    self.gpio_outputs["9"] = 1
-                    if not uart_silenced:
-                        self.serial_buffer.append((self.t_ms, "ERR: Sensor Fault"))
-                else:
-                    self.gpio_outputs["13"] = 0
-                    temp_c = raw_adc * (100.0 / 1023.0)
-                    if temp_c >= 30.0:
-                        self.fan_on_state = True
-                    elif temp_c <= 28.0:
-                        self.fan_on_state = False
-                    self.gpio_outputs["9"] = 1 if self.fan_on_state else 0
-                    if not uart_silenced:
-                        self.serial_buffer.append((self.t_ms, f"T={temp_c:.2f} FAN={'ON' if self.fan_on_state else 'OFF'}"))
-            else:
-                temp_c = raw_adc * (100.0 / 1023.0)
-                fan_on = temp_c >= 30.0
-                self.gpio_outputs["9"] = 1 if fan_on else 0
-                self.gpio_outputs["13"] = 0
-                if not uart_silenced:
-                    self.serial_buffer.append((self.t_ms, f"T={temp_c:.2f} FAN={'ON' if fan_on else 'OFF'}"))
+            self.gpio_outputs = {"9": 0, "13": 0}
+        for pin in self._inputs_pin_keys():
+            self.adc_channels[pin] = self._default_raw(pin)
 
-    # ------------------------------------------------------------------
-    # Helper methods
-    # ------------------------------------------------------------------
+    def _default_raw(self, pin: str) -> float:
+        unit = self._get_unit(pin)
+        return 300.0 if ("cm" in unit or "dist" in unit) else 256.0
 
-    def _apply_fault(self, pin_key: str) -> float:
-        """Return effective raw ADC value after applying active fault injection."""
-        fault = self.active_faults.get(pin_key)
-        raw = self.adc_channels.get(pin_key, 256.0)
-        if fault in ("open_circuit", "short_to_vcc"):
-            return 1023.0
-        if fault == "short_to_gnd":
-            return 0.0
-        if fault == "stuck":
-            return self.stuck_values.get(pin_key, raw)
-        if fault == "glitch" and self.glitch_counter.get(pin_key, 0) > 0:
-            self.glitch_counter[pin_key] = 0
-            return 1023.0
-        return raw
-
-    def _resolve_input_pin(self, sig_lower: str) -> Optional[str]:
-        """Map a signal name token to its ADC channel pin key."""
+    # ---- pin resolution --------------------------------------------------
+    def _resolve_input_pin(self, sig_lower: str) -> str:
         if sig_lower in self._input_name_to_pin:
             return self._input_name_to_pin[sig_lower]
+        for pin in self.adc_channels:
+            if pin.lower() == sig_lower:
+                return pin
         for name, pin in self._input_name_to_pin.items():
-            if name in sig_lower or sig_lower in name:
+            if name and (name in sig_lower or sig_lower in name):
+                return pin
+        return next(iter(self.adc_channels), "A0")
+
+    def _fault_target(self, signal: str) -> str:
+        s = str(signal).lower()
+        if s in ("uart", "serial"):
+            return "uart"
+        if s in self._input_name_to_pin:
+            return self._input_name_to_pin[s]
+        for pin in self.adc_channels:
+            if pin.lower() == s:
+                return pin
+        for name, pin in self._input_name_to_pin.items():
+            if name and (name in s or s in name):
                 return pin
         if self.adc_channels:
-            return list(self.adc_channels.keys())[0]
+            return next(iter(self.adc_channels))
         return "A0"
 
-    def _to_raw(self, pin_key: str, eng_val: float, sig_lower: str = "") -> float:
-        """Convert engineering-unit value to raw ADC count for a channel."""
-        unit = self._get_unit(pin_key)
-        v_range = self._get_valid_range(pin_key)
-        if "cm" in unit or "dist" in unit or "raw" in unit:
-            return max(0.0, min(1023.0, eng_val))
-        if v_range and v_range[1] > v_range[0]:
-            scale = 1023.0 / (v_range[1] - v_range[0])
-            return max(0.0, min(1023.0, (eng_val - v_range[0]) * scale))
-        if eng_val > 100.0:
-            return max(0.0, min(1023.0, eng_val))
-        return max(0.0, min(1023.0, eng_val * (1023.0 / 100.0)))
+    # ---- unit handling ---------------------------------------------------
+    @staticmethod
+    def _parse_value(value) -> Tuple[str, Optional[float]]:
+        if isinstance(value, str):
+            v = value.strip().lower()
+            for prefix, mode in (("raw:", "raw"), ("eng:", "eng")):
+                if v.startswith(prefix):
+                    v, m = v[len(prefix):], mode
+                    break
+            else:
+                m = "auto"
+            try:
+                return m, float(v)
+            except ValueError:
+                return "auto", None
+        try:
+            return "auto", float(value)
+        except (TypeError, ValueError):
+            return "auto", None
 
-    def _to_engineering(self, pin_key: str, raw: float) -> float:
-        """Convert raw ADC count to engineering units for a channel."""
-        unit = self._get_unit(pin_key)
-        v_range = self._get_valid_range(pin_key)
-        if "cm" in unit or "dist" in unit or "raw" in unit:
+    def _clamp(self, v: float) -> float:
+        return max(0.0, min(self.full_scale, v))
+
+    def _range(self, pin: str) -> Tuple[float, float]:
+        vr = self._get_valid_range(pin)
+        if vr and vr[1] > vr[0]:
+            return float(vr[0]), float(vr[1])
+        return 0.0, 100.0
+
+    def _is_raw_unit(self, pin: str) -> bool:
+        unit = self._get_unit(pin)
+        return "cm" in unit or "dist" in unit or "raw" in unit
+
+    def _to_raw(self, pin: str, val: float, mode: str = "auto") -> float:
+        if mode == "raw" or self._is_raw_unit(pin):
+            return self._clamp(val)
+        lo, hi = self._range(pin)
+        if mode == "auto" and val > hi:      # legacy rule: big numbers are counts
+            return self._clamp(val)
+        return self._clamp((val - lo) * self.full_scale / (hi - lo))
+
+    def _to_engineering(self, pin: str, raw: float) -> float:
+        if self._is_raw_unit(pin):
             return raw
-        if v_range and v_range[1] > v_range[0]:
-            scale = (v_range[1] - v_range[0]) / 1023.0
-            return v_range[0] + (raw * scale)
-        return raw * (100.0 / 1023.0)
+        lo, hi = self._range(pin)
+        return lo + raw * (hi - lo) / self.full_scale
 
-    def _get_unit(self, pin_key: str) -> str:
-        """Return unit string for an input channel's pin key."""
-        if self.model and self.model.inputs:
-            for s in self.model.inputs:
-                rpin = str(s.pin) if s.pin is not None else s.name
-                if rpin == pin_key or s.name.lower() == pin_key.lower():
-                    return (s.unit or "").lower()
+    def _get_unit(self, pin: str) -> str:
+        for s in self._model_inputs():
+            if self._pin_key(s) == pin or str(_get(s, "name", "")).lower() == pin.lower():
+                return str(_get(s, "unit", "") or "").lower()
         return ""
 
-    def _get_valid_range(self, pin_key: str) -> Optional[Tuple[float, float]]:
-        """Return valid_range tuple for an input channel's pin key if present."""
-        if self.model and self.model.inputs:
-            for s in self.model.inputs:
-                rpin = str(s.pin) if s.pin is not None else s.name
-                if rpin == pin_key or s.name.lower() == pin_key.lower():
-                    return s.valid_range
+    def _get_valid_range(self, pin: str):
+        for s in self._model_inputs():
+            if self._pin_key(s) == pin or str(_get(s, "name", "")).lower() == pin.lower():
+                return _get(s, "valid_range")
         return None
 
+    # ---- simulation step -------------------------------------------------
+    def _step_hardware(self) -> None:
+        silenced = self.faults.is_active("uart", "silence")
+        if self._model_inputs():
+            self._step_model(silenced)
+        else:
+            self._step_legacy(silenced)
 
+    def _emit(self, silenced: bool, text: str) -> None:
+        if not silenced:
+            self.serial_buffer.append((self.t_ms, text))
 
+    def _sensor_error(self, readings: Dict[str, float]) -> bool:
+        for s in self._model_inputs():
+            pin = self._pin_key(s)
+            raw = readings.get(pin, 256.0)
+            vr = _get(s, "valid_range")
+            if vr and not self._is_raw_unit(pin):
+                lo_raw = self._to_raw(pin, vr[0], "eng")
+                hi_raw = self._to_raw(pin, vr[1], "eng")
+                if raw <= lo_raw + 4 or raw >= hi_raw - 4:
+                    return True
+            elif raw <= 4 or raw >= self.full_scale - 4:
+                return True
+        return False
+
+    @staticmethod
+    def _compare(eng: float, op: str, t: float) -> bool:
+        return ((op in (">=", "=>") and eng >= t) or (op in ("<=", "=<") and eng <= t)
+                or (op == ">" and eng > t) or (op == "<" and eng < t) or (op == "==" and eng == t))
+
+    def _step_model(self, silenced: bool) -> None:
+        readings = {p: self.faults.apply(p, raw) for p, raw in self.adc_channels.items()}
+        error = self._sensor_error(readings)
+        good = self.firmware_type == "good"
+
+        actuators, err_pins = [], []
+        for s in self._model_outputs():
+            name = str(_get(s, "name", "")).lower()
+            (err_pins if any(w in name for w in _ERR_WORDS) else actuators).append(self._pin_key(s))
+
+        ths = list(_get(self.model, "thresholds", None) or [])
+        th = ths[0] if ths else None
+        if th is not None and actuators:
+            pin = self._resolve_input_pin(str(_get(th, "signal", "")).lower())
+            eng = self._to_engineering(pin, readings.get(pin, 256.0))
+            op = str(_get(th, "op", ">="))
+            tval = float(_get(th, "value", 0.0))
+            triggered = self._compare(eng, op, tval)
+            if good and error:
+                self.fan_on_state = True                     # fail-safe ON
+            elif good:
+                h = _get(th, "hysteresis")
+                hyst = self.default_hysteresis if h is None else float(h)
+                margin = eng - tval if op in (">", ">=", "=>") else tval - eng
+                if triggered:
+                    self.fan_on_state = True
+                elif margin <= -hyst:
+                    self.fan_on_state = False
+            else:
+                self.fan_on_state = triggered
+            for p in actuators:
+                self.gpio_outputs[p] = 1 if self.fan_on_state else 0
+        for p in err_pins:                                    # buggy model never drives it
+            self.gpio_outputs[p] = 1 if (good and error) else 0
+
+        if good and error:
+            self._emit(silenced, "ERR: Sensor Fault")
+            return
+        parts = []
+        for s in self._model_inputs():
+            pin = self._pin_key(s)
+            parts.append(f"{str(_get(s, 'name', pin)).upper()}="
+                         f"{self._to_engineering(pin, readings.get(pin, 256.0)):.2f}")
+        for s in self._model_outputs():
+            parts.append(f"{str(_get(s, 'name', '')).upper()}="
+                         f"{'ON' if self.gpio_outputs.get(self._pin_key(s), 0) else 'OFF'}")
+        if parts:
+            self._emit(silenced, " ".join(parts))
+
+    def _step_legacy(self, silenced: bool) -> None:
+        raw = self.faults.apply("A0", self.adc_channels.get("A0", 256.0))
+        temp = raw * (100.0 / self.full_scale)
+        if self.firmware_type == "good":
+            if raw <= 4 or raw >= self.full_scale - 4:
+                self.gpio_outputs["13"] = 1
+                self.gpio_outputs["9"] = 1
+                self._emit(silenced, "ERR: Sensor Fault")
+                return
+            self.gpio_outputs["13"] = 0
+            if temp >= 30.0:
+                self.fan_on_state = True
+            elif temp <= 28.0:
+                self.fan_on_state = False
+            self.gpio_outputs["9"] = 1 if self.fan_on_state else 0
+            self._emit(silenced, f"T={temp:.2f} FAN={'ON' if self.fan_on_state else 'OFF'}")
+        else:
+            fan = temp >= 30.0
+            self.gpio_outputs["9"] = 1 if fan else 0
+            self.gpio_outputs["13"] = 0
+            self._emit(silenced, f"T={temp:.2f} FAN={'ON' if fan else 'OFF'}")

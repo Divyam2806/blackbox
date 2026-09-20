@@ -7,7 +7,7 @@ from fwagent.evaluator.invariants import InvariantChecker
 class OracleEvaluator:
     """
     4-Tier Embedded Test Oracle Evaluator.
-    Combines Spec Rules (R1-R3), Code Intent, Universal Invariants (I1-I3), and Metamorphic checks.
+    Combines Spec Rules (R1-R3), Code Intent, Universal Invariants (I1-I3), Physical Safety, and Metamorphic checks.
     Outputs evidence-backed verdicts (PASS, FAIL, WARN, AMBIGUOUS, INCONCLUSIVE).
     """
 
@@ -23,12 +23,13 @@ class OracleEvaluator:
         test_id = test_case.id
         logs: List[Tuple[int, str]] = sim_output.get("serial_logs", [])
         pin_trace: List[Dict[str, Any]] = sim_output.get("pin_trace", [])
+        physical_obs: List[Any] = sim_output.get("physical_obs", [])
         events = self.log_parser.parse(logs)
 
         evidence: List[str] = [f"[{t_ms}ms] {line}" for t_ms, line in logs[-5:]] if logs else ["No serial logs captured"]
         rule_ids = list(set(e.rule_id for e in test_case.expects if e.rule_id))
 
-        # Build structured evidence chain: gpio snapshots + uart lines
+        # Build structured evidence chain: gpio snapshots + uart lines + physical events
         evidence_chain: List[dict] = []
         for entry in pin_trace:
             t_ms_snap = entry.get("t_ms", 0)
@@ -48,9 +49,18 @@ class OracleEvaluator:
                 "detail": line,
                 "data": {"line": line},
             })
+        for p_obs in physical_obs:
+            t_ms_p = getattr(p_obs, "t_ms", 0)
+            sig_p = getattr(p_obs, "signal", "physical")
+            val_p = getattr(p_obs, "value", 0)
+            evidence_chain.append({
+                "ms": t_ms_p,
+                "category": "physical",
+                "detail": f"Physical {sig_p}={val_p}",
+                "data": {"signal": sig_p, "value": val_p},
+            })
 
         has_err_log = any("ERR" in line.upper() or "FAULT" in line.upper() for _, line in logs)
-        has_err_pin = any(entry.get("err_pin", 0) == 1 for entry in pin_trace)
 
         # Derive signal names from model for readable verdict labels
         output_name = "output"
@@ -118,7 +128,7 @@ class OracleEvaluator:
                     observed="Error correctly signaled: " + (logs[-1][1] if logs else "ERR_LED HIGH")
                 )
 
-        # Check Spec-derived expectations (R1 & R2 & explicit Expect items)
+        # Check Physical / Spec-derived expectations (physical_eq, within_tolerance, output_eq, serial_contains)
         thresh_val_str = str(self.model.thresholds[0].value) if (self.model and self.model.thresholds) else ""
 
         for expect in test_case.expects:
@@ -126,7 +136,24 @@ class OracleEvaluator:
             target = expect.target or output_name
             target_val = str(expect.value) if expect.value is not None else ""
 
-            if kind == "output_eq":
+            if kind in ("physical_eq", "within_tolerance"):
+                # Evaluate physical observations from SITL Gazebo plant
+                p_matches = [po for po in physical_obs if getattr(po, "signal", "").lower() == target.lower()]
+                if p_matches:
+                    actual_val = float(getattr(p_matches[-1], "value", 0.0))
+                    expected_num = float(expect.value) if expect.value is not None else 0.0
+                    tol = float(getattr(expect, "tolerance", 0.5))
+                    if abs(actual_val - expected_num) > tol:
+                        return Verdict(
+                            test_id=test_id,
+                            status="FAIL",
+                            evidence=evidence + [f"Physical signal {target}={actual_val}, expected {expected_num}±{tol}"],
+                            evidence_chain=evidence_chain,
+                            rule_ids=[expect.rule_id] if expect.rule_id else ["PHYS1"],
+                            expected=f"Physical state {target}={expected_num} (±{tol})",
+                            observed=f"Observed physical state {target}={actual_val}"
+                        )
+            elif kind == "output_eq":
                 out_events = [e for e in events if e.signal.lower() in (target.lower(), output_name.lower())]
                 if out_events:
                     last_out_val = str(out_events[-1].value)
@@ -174,4 +201,3 @@ class OracleEvaluator:
             expected="Observed output matches expected requirement",
             observed=last_log
         )
-

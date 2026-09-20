@@ -192,7 +192,9 @@ model_data = load_json_file(os.path.join(active_dir, "firmware_model.json")) if 
 plan_data = load_json_file(os.path.join(active_dir, "test_plan.json")) if active_dir else None
 results_data = load_json_file(os.path.join(active_dir, "results.json")) if active_dir else None
 findings_data = load_json_file(os.path.join(active_dir, "findings.json")) if active_dir else None
+suggestions_data = load_json_file(os.path.join(active_dir, "suggestions.json")) if active_dir else None
 coverage_data = load_json_file(os.path.join(active_dir, "coverage.json")) if active_dir else None
+
 
 # Header & Live Stage Tracker (Row 1)
 st.title("⚡ BlackBox FW-Agent — Autonomous Embedded Test Dashboard")
@@ -346,9 +348,23 @@ with tab_findings:
             """, unsafe_allow_html=True)
             st.markdown("**Suggested C Code Fix Snippet:**")
             st.code(f.get("suggested_fix", ""), language="cpp")
+        st.divider()
+
+    st.subheader("🤖 Gemini AI Firmware Improvement Recommendations")
+    if suggestions_data:
+        for idx, s in enumerate(suggestions_data, start=1):
+            category = s.get("category", "Improvement")
+            title = s.get("title", "")
+            desc = s.get("description", "")
+            code = s.get("code_snippet")
+            st.markdown(f"#### [{idx}] {title} (`{category}`)")
+            st.write(desc)
+            if code:
+                st.code(code, language="cpp")
             st.divider()
     else:
-        st.info("No high-priority findings detected.")
+        st.info("No AI suggestions loaded for this run.")
+
 
 # Tab 6: Coverage & Proof Metrics
 with tab_cov:

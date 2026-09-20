@@ -1,12 +1,15 @@
 """
 CLI Interface for BlackBox FW-Agent.
 Usage:
-    python -m fwagent.cli run <firmware_dir> [--spec spec.md]
+    python -m fwagent.cli run <firmware_dir> [--spec spec.md] [--sim auto|host|wokwi|renode|gazebo|all]
 """
 
 import argparse
 import sys
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Add src directory to path if executed directly
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -27,7 +30,7 @@ def main():
     run_parser.add_argument("firmware_dir", type=str, help="Path to firmware directory")
     run_parser.add_argument("--spec", type=str, default=None, help="Path to optional spec.md file")
     run_parser.add_argument("--out", type=str, default=None, help="Output directory for run artifacts")
-    run_parser.add_argument("--sim", type=str, default="host", choices=["host", "wokwi", "fake"], help="Simulator adapter")
+    run_parser.add_argument("--sim", type=str, default="auto", choices=["auto", "host", "wokwi", "renode", "gazebo", "all"], help="Simulator adapter choice")
 
     args = parser.parse_args()
 
@@ -56,11 +59,13 @@ def main():
                 self.log_f = log_f
             def write(self, msg):
                 self.term.write(msg)
-                self.log_f.write(msg)
-                self.log_f.flush()
+                if not self.log_f.closed:
+                    self.log_f.write(msg)
+                    self.log_f.flush()
             def flush(self):
                 self.term.flush()
-                self.log_f.flush()
+                if not self.log_f.closed:
+                    self.log_f.flush()
 
         log_f = open(log_path, "w", encoding="utf-8")
         sys.stdout = TeeStdout(sys.stdout, log_f)

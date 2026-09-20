@@ -26,6 +26,7 @@ from fwagent.regression.manager import RegressionManager
 
 
 from fwagent.simulator.wokwi_adapter import WokwiAdapter
+from fwagent.simulator.factory import SimulatorFactory, compare_backend_results
 
 
 class Orchestrator:
@@ -40,19 +41,17 @@ class Orchestrator:
         self.planner = Planner()
         self.prioritiser = Prioritiser()
         self.adaptive_planner = AdaptivePlanner()
-        if getattr(self.config, "simulator", "host") == "wokwi":
-            self.simulator = WokwiAdapter(self.config.firmware_dir)
-        else:
-            self.simulator = HostHALSimulator()
+        sim_choice = getattr(self.config, "simulator", "auto")
+        self.simulator, self.fallback_notice = SimulatorFactory.create(sim_choice, self.config.firmware_dir)
         self.executor = Executor(self.simulator)
         self.explainer = RootCauseExplainer()
         self.gemini_explainer = GeminiExplainer()
         self.reporter = HTMLReporter()
 
     def run(self, firmware_dir: str, spec_file: Optional[str] = None, out_dir: Optional[str] = None, progress_callback=None) -> Dict[str, Any]:
-        if self.config.simulator == "wokwi":
-            self.simulator = WokwiAdapter(firmware_dir)
-            self.executor = Executor(self.simulator)
+        sim_choice = getattr(self.config, "simulator", "auto")
+        self.simulator, self.fallback_notice = SimulatorFactory.create(sim_choice, firmware_dir)
+        self.executor = Executor(self.simulator)
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         fw_name = os.path.basename(os.path.normpath(firmware_dir))
@@ -88,6 +87,8 @@ class Orchestrator:
             line_index = None
             behavior_graph = None
 
+        if hasattr(self.simulator, "set_model"):
+            self.simulator.set_model(model)
         if hasattr(self.simulator, "set_firmware_type"):
             self.simulator.set_firmware_type("good" if "good" in firmware_dir.lower() else "buggy")
 
@@ -214,12 +215,35 @@ class Orchestrator:
             print("  [+] Running Dynamic Deterministic Root Cause Explainer...")
             findings = self.explainer.analyze_findings(all_verdicts, model, behavior_graph, line_index)
 
-        report_file = self.reporter.generate_report(fw_name, all_verdicts, findings, all_logs, out_dir, model=model, test_plan=test_plan)
+        print("  [+] Requesting Gemini AI Suggestions for Firmware Improvement & Robustness...")
+        suggestions = self.gemini_explainer.generate_suggestions(
+            all_verdicts,
+            model=model,
+            findings=findings,
+            spec_text=spec_content,
+            firmware_code=fw_code_content
+        )
+
+        sim_name = getattr(self.simulator, "backend_name", self.config.simulator)
+        report_file = self.reporter.generate_report(
+            fw_name,
+            all_verdicts,
+            findings,
+            all_logs,
+            out_dir,
+            model=model,
+            test_plan=test_plan,
+            simulator_name=sim_name,
+            trusted_window=str(trusted_adc_window),
+            round_no=round_no,
+            suggestions=suggestions
+        )
 
         model_file = os.path.join(out_dir, "firmware_model.json")
         plan_file = os.path.join(out_dir, "test_plan.json")
         results_file = os.path.join(out_dir, "results.json")
         findings_file = os.path.join(out_dir, "findings.json")
+        suggestions_file = os.path.join(out_dir, "suggestions.json")
 
         with open(model_file, "w", encoding="utf-8") as f:
             f.write(model.model_dump_json(indent=2))
@@ -231,6 +255,9 @@ class Orchestrator:
 
         with open(findings_file, "w", encoding="utf-8") as f:
             json.dump([fi.model_dump() for fi in findings], f, indent=2)
+
+        with open(suggestions_file, "w", encoding="utf-8") as f:
+            json.dump([s.model_dump() for s in suggestions], f, indent=2)
 
         # Regression check: compare against previous run
         prev_findings_path = os.path.join("runs", "last_findings.json")
@@ -255,10 +282,12 @@ class Orchestrator:
         print(f"    - Test Plan:         {plan_file}")
         print(f"    - Execution Results: {results_file}")
         print(f"    - Findings:          {findings_file}")
+        print(f"    - Suggestions:       {suggestions_file}")
         print(f"    - HTML Report:       {report_file}")
 
         self._print_results_table(all_verdicts)
         self._print_findings_summary(findings, trusted_adc_window)
+        self._print_suggestions_summary(suggestions)
 
         return {
             "out_dir": out_dir,
@@ -266,6 +295,7 @@ class Orchestrator:
             "test_plan": test_plan,
             "verdicts": all_verdicts,
             "findings": findings,
+            "suggestions": suggestions,
             "trusted_adc_window": trusted_adc_window,
             "report_file": report_file,
             "results_file": results_file,
@@ -336,4 +366,24 @@ class Orchestrator:
             print(f"      Firmware Lines: {lines_str}")
             print(f"      Suggested Fix:\n{f.suggested_fix}\n")
         print("==========================================================================================\n")
+
+    def _print_suggestions_summary(self, suggestions: list):
+        if not suggestions:
+            return
+        print("==========================================================================================")
+        print(" GEMINI AI SUGGESTIONS FOR FIRMWARE IMPROVEMENT & SYSTEM ROBUSTNESS")
+        print("==========================================================================================")
+        for idx, s in enumerate(suggestions, start=1):
+            category = getattr(s, "category", "Improvement")
+            title = getattr(s, "title", "")
+            desc = getattr(s, "description", "")
+            code = getattr(s, "code_snippet", None)
+            print(f" [{idx}] Category: {category} | Title: {title}")
+            print(f"      Recommendation: {desc}")
+            if code:
+                print(f"      Suggested Code:\n{code}")
+            print()
+        print("==========================================================================================\n")
+
+
 

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "gazebo-fwagent": {
+      "command": "python",
+      "args": [
+        "c:/Users/DR.RAJESH KUMAR/blackbox/server/mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "c:/Users/DR.RAJESH KUMAR/blackbox/src",
+        "FWAGENT_GZ_WORLD": "worlds/diff_drive.sdf",
+        "FWAGENT_GZ_CMD_TOPIC": "/model/vehicle_blue/cmd_vel",
+        "FWAGENT_GZ_POSE_TOPIC": "/model/vehicle_blue/odometry",
+        "FWAGENT_GZ_REQUIRE": "1"
+      }
+    }
+  }
+}

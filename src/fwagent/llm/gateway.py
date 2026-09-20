@@ -9,7 +9,10 @@ import os
 import re
 from typing import Type, TypeVar, Optional
 from pydantic import BaseModel
+from dotenv import load_dotenv
 from fwagent.llm.cache import LLMCache
+
+load_dotenv()
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -36,7 +39,7 @@ class LLMGateway:
             import time
             import urllib.request
             import urllib.error
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            
             full_prompt = f"{prompt}\n\nUser Input:\n{input_str}\n\nOutput MUST be valid JSON conforming to the requested schema."
             payload = {
                 "contents": [{"parts": [{"text": full_prompt}]}],
@@ -46,32 +49,25 @@ class LLMGateway:
                 },
             }
             req_data = json.dumps(payload).encode("utf-8")
-            for attempt in range(3):
+            
+            for model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={gemini_key}"
                 try:
                     req = urllib.request.Request(
                         url,
                         headers={"Content-Type": "application/json"},
                         data=req_data,
                     )
-                    with urllib.request.urlopen(req, timeout=90) as resp:
+                    with urllib.request.urlopen(req, timeout=40) as resp:
                         res_body = json.loads(resp.read().decode("utf-8"))
                         raw_text = res_body["candidates"][0]["content"]["parts"][0]["text"]
-                        # Extract JSON if wrapped in markdown code fence
                         if "```" in raw_text:
                             raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.MULTILINE)
                             raw_text = re.sub(r"\s*```$", "", raw_text.strip(), flags=re.MULTILINE)
                         response_json = json.loads(raw_text)
                         break
-                except urllib.error.HTTPError as http_err:
-                    if http_err.code == 429 and attempt < 2:
-                        print(f"  [!] Gemini Rate Limit (429). Retrying in 4s (attempt {attempt + 1}/3)...")
-                        time.sleep(4)
-                    else:
-                        print(f"  [!] LLMGateway Gemini HTTP Error: {http_err}")
-                        break
                 except Exception as e:
-                    print(f"  [!] LLMGateway Gemini Error: {e}")
-                    break
+                    continue
 
         if not response_json and openai_key and self.provider != "mock":
             try:
@@ -187,5 +183,21 @@ class LLMGateway:
                 "rules": rules,
                 "log_patterns": extracted_log_patterns,
             }
+
+        elif name == "FindingsResponse":
+            try:
+                data = json.loads(input_str)
+                fw_model_dict = data.get("firmware_model", {})
+                verdicts_list = data.get("verdicts", [])
+                from fwagent.models import FirmwareModel, Verdict
+                model_obj = FirmwareModel.model_validate(fw_model_dict) if fw_model_dict else None
+                verdict_objs = [Verdict.model_validate(v) for v in verdicts_list] if verdicts_list else []
+                from fwagent.explainer.root_cause import RootCauseExplainer
+                findings = RootCauseExplainer().analyze_findings(verdict_objs, model_obj)
+                if findings:
+                    return {"findings": [f.model_dump(mode="json") for f in findings]}
+            except Exception:
+                pass
+            return {"findings": []}
 
         return {}

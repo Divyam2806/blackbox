@@ -1,0 +1,26 @@
+# Agent Configuration
+max_rounds: 3
+time_budget_s: 300
+llm_call_budget: 10
+
+simulators:
+  default: auto
+  host:
+    enabled: true
+  wokwi:
+    enabled: true
+    timeout_s: 60
+  renode:
+    enabled: true
+    platform: "boards/renode/stm32.resc"
+    timeout_s: 60
+  gazebo:
+    enabled: true
+    world: "worlds/plant.sdf"
+    tick_ms: 10
+    timeout_s: 120
+
+llm:
+  model: "gemini-2.5-flash"
+  temperature: 0.0
+  cache_prompts: true

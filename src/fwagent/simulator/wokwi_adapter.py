@@ -13,8 +13,19 @@ class WokwiAdapter(Simulator):
     Wokwi Hardware Simulator Adapter.
     Runs Wokwi CLI simulation with automatic fallback to Host-HAL if CLI fails or times out.
     """
+    capabilities = {"real_mcu", "wokwi_parts", "arduino"}
 
-    def __init__(self, firmware_dir: str):
+    @classmethod
+    def available(cls) -> Tuple[bool, str]:
+        import shutil
+        exe = shutil.which("wokwi-cli")
+        if not exe:
+            return False, "wokwi-cli executable not found"
+        if not os.environ.get("WOKWI_CLI_TOKEN"):
+            return False, "WOKWI_CLI_TOKEN environment variable not set"
+        return True, "Wokwi CLI ready"
+
+    def __init__(self, firmware_dir: str = "."):
         self.firmware_dir = firmware_dir
         self.wokwi_cli = WokwiCLISimulator(firmware_dir)
         self.fallback_sim = HostHALSimulator()

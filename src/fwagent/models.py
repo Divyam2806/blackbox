@@ -72,6 +72,8 @@ class Expect(BaseModel):
         "transition_count",
         "within_ms",
         "no_change",
+        "physical_eq",
+        "within_tolerance",
     ]
     target: Optional[str] = None
     value: Optional[float | str] = None
@@ -115,11 +117,23 @@ class FindingsResponse(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
 
 
+class ImprovementSuggestion(BaseModel):
+    category: str = Field(default="Architecture & Robustness")
+    title: str = Field(default="")
+    description: str = Field(default="")
+    code_snippet: Optional[str] = Field(default=None)
+
+
+class SuggestionsResponse(BaseModel):
+    suggestions: list[ImprovementSuggestion] = Field(default_factory=list)
+
+
+
 
 class RunConfig(BaseModel):
     firmware_dir: str
     spec_file: Optional[str] = None
-    simulator: Literal["host", "wokwi", "fake"] = "host"
+    simulator: Literal["auto", "host", "wokwi", "renode", "gazebo", "all", "fake"] = "auto"
     max_rounds: int = 3
     test_timeout_s: float = 10.0
     llm_provider: str = "mock"  # or openai, ollama, anthropic

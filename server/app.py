@@ -358,15 +358,22 @@ def list_past_runs():
     return sorted(runs_list, key=lambda x: x["time"], reverse=True)
 
 
+@app.get("/api/history")
+def get_history_alias():
+    """Alias for /api/runs matching frontend history endpoint."""
+    return {"runs": list_past_runs()}
+
+
 @app.get("/api/runs/{run_id}/summary")
 def get_run_summary(run_id: str):
-    """Return scoreboard counts, findings, and status for a run."""
+    """Return scoreboard counts, findings, suggestions, and status for a run."""
     run_dir = os.path.join("runs", run_id)
     if not os.path.exists(run_dir):
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
     results_file = os.path.join(run_dir, "results.json")
     findings_file = os.path.join(run_dir, "findings.json")
+    suggestions_file = os.path.join(run_dir, "suggestions.json")
     status_file = os.path.join(run_dir, "status.json")
 
     verdicts = []
@@ -378,6 +385,11 @@ def get_run_summary(run_id: str):
     if os.path.exists(findings_file):
         with open(findings_file, "r", encoding="utf-8") as f:
             findings = json.load(f)
+
+    suggestions = []
+    if os.path.exists(suggestions_file):
+        with open(suggestions_file, "r", encoding="utf-8") as f:
+            suggestions = json.load(f)
 
     status_data = {}
     if os.path.exists(status_file):
@@ -396,9 +408,21 @@ def get_run_summary(run_id: str):
         "run_id": run_id,
         "scoreboard": scoreboard,
         "findings": findings,
+        "suggestions": suggestions,
         "verdicts": verdicts,
         "status": status_data
     }
+
+
+@app.get("/api/runs/{run_id}/suggestions")
+def get_run_suggestions(run_id: str):
+    """Serve suggestions.json artifact for a run."""
+    p = os.path.join("runs", run_id, "suggestions.json")
+    if not os.path.exists(p):
+        return []
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 
 
 @app.get("/api/runs/{run_id}/report")
@@ -516,3 +540,9 @@ async def replay_run_stream(run_id: str):
 static_dir = os.path.abspath("static")
 if os.path.exists(static_dir):
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+

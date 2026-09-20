@@ -7,15 +7,15 @@ and targeted C++ patches for firmware test failures.
 import json
 import os
 from typing import List, Optional
-from fwagent.models import Verdict, Finding, FirmwareModel, FindingsResponse
+from fwagent.models import Verdict, Finding, FirmwareModel, FindingsResponse, ImprovementSuggestion, SuggestionsResponse
 from fwagent.llm.gateway import LLMGateway
 
 
 class GeminiExplainer:
     """
-    LLM-powered Root Cause Explainer using Gemini API.
+    LLM-powered Root Cause Explainer & System Improvement Advisor using Gemini API.
     Dynamically analyzes spec text, source code, and failing execution traces to produce
-    line-mapped findings and drop-in C++ code fixes.
+    line-mapped findings, drop-in C++ code fixes, and architectural suggestions.
     """
 
     def __init__(self, provider: str = "gemini"):
@@ -92,12 +92,10 @@ class GeminiExplainer:
                 schema_class=FindingsResponse,
             )
             if res and res.findings:
-                # Normalize and trim likely_cause to ensure conciseness
                 for f in res.findings:
                     if f.severity:
                         f.severity = f.severity.capitalize()
                     if f.likely_cause:
-                        # Keep maximum 2 sentences or 220 chars
                         sentences = [s.strip() for s in f.likely_cause.split(". ") if s.strip()]
                         if len(sentences) > 2:
                             f.likely_cause = ". ".join(sentences[:2]) + "."
@@ -109,3 +107,97 @@ class GeminiExplainer:
             return None
 
         return None
+
+    def generate_suggestions(
+        self,
+        verdicts: List[Verdict],
+        model: Optional[FirmwareModel] = None,
+        findings: Optional[List[Finding]] = None,
+        spec_text: str = "",
+        firmware_code: str = "",
+    ) -> List[ImprovementSuggestion]:
+        """
+        Queries Gemini API to generate deep firmware improvement suggestions and architectural recommendations.
+        """
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY") or os.environ.get("LLM_API_KEY")
+        
+        prompt = (
+            "You are an expert embedded firmware systems architect and static analysis advisor.\n"
+            "Analyze the target firmware code, extracted model, and test findings to provide 3-4 concrete, actionable Suggestions for Improvement.\n"
+            "Focus on: Rail Boundary Validation, Filtering/Hysteresis, Explicit Error Indicator States, Watchdog Timers, State Machine Resilience.\n"
+            "Your response MUST be a JSON object conforming to this schema:\n"
+            "{\n"
+            "  \"suggestions\": [\n"
+            "    {\n"
+            "      \"category\": \"Fault Tolerance & Plausibility\",\n"
+            "      \"title\": \"Implement ADC Rail Plausibility Checks\",\n"
+            "      \"description\": \"Guard against open circuit or grounded sensor wires by rejecting raw counts <= 4 or >= 1019.\",\n"
+            "      \"code_snippet\": \"if (raw <= 4 || raw >= 1019) { set_error_state(); }\"\n"
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        )
+
+        input_data = {
+            "firmware_name": model.firmware_name if model else "firmware",
+            "inputs": [s.name for s in model.inputs] if model else [],
+            "outputs": [s.name for s in model.outputs] if model else [],
+            "findings": [f.model_dump(mode="json") for f in (findings or [])],
+            "verdicts_summary": {
+                "total": len(verdicts),
+                "pass": sum(1 for v in verdicts if v.status == "PASS"),
+                "fail": sum(1 for v in verdicts if v.status == "FAIL"),
+            },
+            "firmware_code": firmware_code[:4000] if firmware_code else "",
+        }
+
+        if api_key:
+            try:
+                res: SuggestionsResponse = self.gateway.query_structured(
+                    prompt=prompt,
+                    input_str=json.dumps(input_data, indent=2),
+                    schema_class=SuggestionsResponse,
+                )
+                if res and res.suggestions:
+                    return res.suggestions
+            except Exception as e:
+                print(f"  [!] Gemini suggestions exception: {e}")
+
+        return self._generate_fallback_suggestions(model, findings)
+
+    def _generate_fallback_suggestions(
+        self,
+        model: Optional[FirmwareModel] = None,
+        findings: Optional[List[Finding]] = None,
+    ) -> List[ImprovementSuggestion]:
+        """Dynamic rule-based fallback suggestion generator using model input/output names."""
+        inp_name = model.inputs[0].name if (model and model.inputs) else "sensor_input"
+        out_name = model.outputs[0].name if (model and model.outputs) else "actuator_output"
+
+        return [
+            ImprovementSuggestion(
+                category="Bounds Safety & Input Guarding",
+                title=f"Add Sensor Rail Plausibility Validation for {inp_name}",
+                description=f"Validate raw analog counts before processing {inp_name}. Extreme boundary counts (raw <= 4 or raw >= 1019) indicate open-circuit or short-to-VCC faults.",
+                code_snippet=f"// Plausibility Check:\nif (raw_{inp_name} <= 4 || raw_{inp_name} >= 1019) {{\n    trigger_fault_state(); // Enter safe state\n    return;\n}}"
+            ),
+            ImprovementSuggestion(
+                category="Signal Processing & Hysteresis",
+                title=f"Apply Low-Pass Deadband Filter to {out_name}",
+                description=f"Prevent rapid output chatter on {out_name} near control thresholds by introducing a deadband hysteresis window or exponential moving average (EMA) filter.",
+                code_snippet=f"// Deadband Filter:\nif (abs(current_val - last_val) > DEADBAND_THRESHOLD) {{\n    update_{out_name}(current_val);\n    last_val = current_val;\n}}"
+            ),
+            ImprovementSuggestion(
+                category="Fault State Machine",
+                title="Explicit Error Indicator & Fail-Safe Recovery",
+                description=f"Ensure sensor hardware failures drive an explicit error signal (e.g. error LED or bus fault message) rather than silently defaulting to output fallbacks.",
+                code_snippet=f"// Explicit Error Handling:\nif (sensor_fault_detected) {{\n    digitalWrite(ERROR_PIN, HIGH);\n    digitalWrite({out_name.upper()}_PIN, LOW); // Fail-safe state\n}}"
+            ),
+            ImprovementSuggestion(
+                category="System Resilience",
+                title="Hardware Watchdog & Serial Communication Timeout",
+                description="Enable internal watchdog timer (WDT) and add communication timeout handlers to ensure automatic recovery if main loop execution freezes.",
+                code_snippet="// Watchdog Initialization:\nwdt_enable(WDTO_2S); // 2-second timeout\n// In main loop:\nwdt_reset();"
+            )
+        ]
+
