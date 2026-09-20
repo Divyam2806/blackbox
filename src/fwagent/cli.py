@@ -39,7 +39,34 @@ def main():
             out_dir=args.out,
         )
         orchestrator = Orchestrator(config=config)
-        result = orchestrator.run(args.firmware_dir, spec_file=args.spec, out_dir=args.out)
+
+        # Tee sys.stdout to stdout.log in out_dir
+        out_dir = args.out
+        if not out_dir:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            fw_name = os.path.basename(os.path.normpath(args.firmware_dir))
+            out_dir = os.path.join("runs", f"{timestamp}_{fw_name}")
+        os.makedirs(out_dir, exist_ok=True)
+
+        log_path = os.path.join(out_dir, "stdout.log")
+        class TeeStdout:
+            def __init__(self, term, log_f):
+                self.term = term
+                self.log_f = log_f
+            def write(self, msg):
+                self.term.write(msg)
+                self.log_f.write(msg)
+                self.log_f.flush()
+            def flush(self):
+                self.term.flush()
+                self.log_f.flush()
+
+        log_f = open(log_path, "w", encoding="utf-8")
+        sys.stdout = TeeStdout(sys.stdout, log_f)
+
+        result = orchestrator.run(args.firmware_dir, spec_file=args.spec, out_dir=out_dir)
+        log_f.close()
         sys.exit(0)
     else:
         parser.print_help()

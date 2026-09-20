@@ -14,6 +14,8 @@ from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, JSO
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from fastapi.staticfiles import StaticFiles
+
 # Ensure src is on sys.path
 sys.path.insert(0, os.path.abspath("src"))
 
@@ -465,3 +467,52 @@ def get_run_chart(run_id: str):
     if not os.path.exists(p):
         raise HTTPException(status_code=404, detail="timeline_chart.png not found")
     return FileResponse(p, media_type="image/png")
+
+
+@app.get("/api/runs/{run_id}/replay")
+async def replay_run_stream(run_id: str):
+    """
+    Replay a past run's stdout.log as SSE events with simulated timing.
+    """
+    run_dir = os.path.join("runs", run_id)
+    log_file = os.path.join(run_dir, "stdout.log")
+    status_file = os.path.join(run_dir, "status.json")
+
+    if not os.path.exists(run_dir):
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    async def replay_generator():
+        lines = []
+        if os.path.exists(log_file):
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = [l.strip() for l in f.readlines()]
+        else:
+            lines = [f"Replaying run {run_id}... (No stdout.log found)"]
+
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8") as f:
+                    status_data = json.load(f)
+                yield f"event: status\ndata: {json.dumps(status_data)}\n\n"
+            except Exception:
+                pass
+
+        for line in lines:
+            yield f"event: log\ndata: {json.dumps({'line': line})}\n\n"
+            await asyncio.sleep(0.02)
+
+        done_payload = {
+            "exit_code": 0,
+            "run_id": run_id,
+            "report_url": f"/api/runs/{run_id}/report",
+            "status": "done"
+        }
+        yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
+    return StreamingResponse(replay_generator(), media_type="text/event-stream")
+
+
+# Mount static web UI files at /
+static_dir = os.path.abspath("static")
+if os.path.exists(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

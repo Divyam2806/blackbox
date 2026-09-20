@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlackBox FW-Agent — Autonomous Firmware Testing Engine</title>
+    <link rel="stylesheet" href="/style.css">
+    <!-- FontAwesome icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="dark-mode">
+
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="fa-solid fa-bolt brand-icon"></i>
+                <div>
+                    <h2>BlackBox FW-Agent</h2>
+                    <span class="subtitle">Autonomous Firmware Test Engine</span>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3><i class="fa-solid fa-folder-open"></i> 1. Firmware Target Setup</h3>
+                
+                <label>Select Built-in Sample:</label>
+                <select id="sampleSelect" class="form-control">
+                    <option value="custom">-- Custom Upload Below --</option>
+                    <option value="cooling_fan_buggy" selected>cooling_fan_buggy</option>
+                    <option value="cooling_fan_good">cooling_fan_good</option>
+                    <option value="door_lock_fsm/buggy">door_lock_fsm/buggy</option>
+                    <option value="door_lock_fsm/good">door_lock_fsm/good</option>
+                    <option value="water_pump_controller">water_pump_controller</option>
+                    <option value="avr_radar_scanner">avr_radar_scanner</option>
+                    <option value="drone_obstacle_avoidance">drone_obstacle_avoidance</option>
+                    <option value="smart_irrigation_controller">smart_irrigation_controller</option>
+                </select>
+
+                <label>Or Upload Firmware Folder:</label>
+                <input type="file" id="firmwareFolderInput" webkitdirectory multiple class="file-input">
+
+                <label>Or Upload Firmware .zip File:</label>
+                <input type="file" id="firmwareZipInput" accept=".zip" class="file-input">
+
+                <label>Optional spec.md File:</label>
+                <input type="file" id="specFileInput" accept=".md" class="file-input">
+            </div>
+
+            <div class="section">
+                <h3><i class="fa-solid fa-sliders"></i> 2. Profile & Simulator</h3>
+                <label>Board Profile:</label>
+                <select id="boardSelect" class="form-control">
+                    <option value="Arduino Uno (ATmega328P)">Arduino Uno (ATmega328P)</option>
+                    <option value="ESP32 DevKit">ESP32 DevKit</option>
+                    <option value="STM32 Nucleo">STM32 Nucleo</option>
+                    <option value="Auto-detect">Auto-detect</option>
+                </select>
+
+                <label>Simulation Engine:</label>
+                <select id="simulatorSelect" class="form-control">
+                    <option value="host">Host-HAL SIL (C++ Software-in-the-Loop)</option>
+                    <option value="wokwi">Wokwi Simulator (AVR/ESP32 Emulation)</option>
+                </select>
+            </div>
+
+            <div class="section">
+                <h3><i class="fa-solid fa-play"></i> 3. Actions</h3>
+                <div class="btn-group">
+                    <button id="btnRun" class="btn btn-primary"><i class="fa-solid fa-rocket"></i> Run Loop</button>
+                    <button id="btnStop" class="btn btn-danger" disabled><i class="fa-solid fa-stop"></i> Stop</button>
+                </div>
+            </div>
+
+            <div class="section">
+                <h3><i class="fa-solid fa-history"></i> 4. Run History & Replay</h3>
+                <label>Past Runs:</label>
+                <select id="historySelect" class="form-control">
+                    <option value="">Loading history...</option>
+                </select>
+                <div class="btn-group mt-2">
+                    <button id="btnLoadHistory" class="btn btn-secondary"><i class="fa-solid fa-folder-open"></i> Load</button>
+                    <button id="btnReplay" class="btn btn-accent"><i class="fa-solid fa-rotate-right"></i> Replay</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Pane -->
+        <main class="main-content">
+            <!-- Top Strip: Header & Pipeline Tracker -->
+            <header class="top-strip">
+                <div class="header-info">
+                    <div>
+                        <span class="info-label">TARGET FIRMWARE:</span>
+                        <strong id="hdrTargetFw">cooling_fan_buggy</strong>
+                    </div>
+                    <div>
+                        <span class="info-label">BOARD:</span>
+                        <span id="hdrBoard">Arduino Uno</span>
+                    </div>
+                    <div>
+                        <span class="info-label">SIMULATOR:</span>
+                        <span id="hdrSim">Host-HAL SIL</span>
+                    </div>
+                    <div>
+                        <span class="info-label">HUMAN INTERVENTIONS:</span>
+                        <span class="badge-success">0 (Autonomous)</span>
+                    </div>
+                </div>
+
+                <!-- Pipeline Stage Tracker -->
+                <div class="stage-tracker">
+                    <div class="stage-step pending" id="stage-UNDERSTAND">
+                        <i class="fa-solid fa-brain"></i>
+                        <span>UNDERSTAND</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+                    
+                    <div class="stage-step pending" id="stage-PLAN">
+                        <i class="fa-solid fa-sitemap"></i>
+                        <span>PLAN</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="stage-step pending" id="stage-EXECUTE">
+                        <i class="fa-solid fa-microchip"></i>
+                        <span>EXECUTE</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="stage-step pending" id="stage-OBSERVE">
+                        <i class="fa-solid fa-eye"></i>
+                        <span>OBSERVE</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="stage-step pending" id="stage-JUDGE">
+                        <i class="fa-solid fa-scale-balanced"></i>
+                        <span>JUDGE</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="stage-step pending" id="stage-ADAPT">
+                        <i class="fa-solid fa-arrows-split-up-and-left"></i>
+                        <span>ADAPT</span>
+                    </div>
+                    <div class="stage-arrow"><i class="fa-solid fa-chevron-right"></i></div>
+
+                    <div class="stage-step pending" id="stage-REPORT">
+                        <i class="fa-solid fa-file-chart-column"></i>
+                        <span>REPORT</span>
+                    </div>
+                </div>
+
+                <!-- Progress Bar -->
+                <div class="progress-container">
+                    <div class="progress-bar-fill" id="progressBarFill" style="width: 0%;"></div>
+                    <span class="progress-text" id="progressText">Ready</span>
+                </div>
+            </header>
+
+            <!-- Notification Error Banner -->
+            <div id="errorBanner" class="alert-banner hidden">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                <span id="errorBannerText">An error occurred</span>
+            </div>
+
+            <!-- Scoreboard Row -->
+            <section class="scoreboard-strip" id="scoreboardStrip">
+                <div class="card card-total">
+                    <div class="title">TOTAL TESTS</div>
+                    <div class="num" id="scTotal">0</div>
+                </div>
+                <div class="card card-pass">
+                    <div class="title">PASS</div>
+                    <div class="num" id="scPass">0</div>
+                </div>
+                <div class="card card-fail">
+                    <div class="title">FAIL</div>
+                    <div class="num" id="scFail">0</div>
+                </div>
+                <div class="card card-warn">
+                    <div class="title">WARN (Flaky)</div>
+                    <div class="num" id="scWarn">0</div>
+                </div>
+                <div class="card card-ambig">
+                    <div class="title">AMBIGUOUS</div>
+                    <div class="num" id="scAmbig">0</div>
+                </div>
+                <div class="card card-inconclusive">
+                    <div class="title">INCONCLUSIVE</div>
+                    <div class="num" id="scInconclusive">0</div>
+                </div>
+                <div class="card card-skipped">
+                    <div class="title">SKIPPED</div>
+                    <div class="num" id="scSkipped">0</div>
+                </div>
+            </section>
+
+            <!-- Main Terminal Output Pane -->
+            <section class="terminal-container">
+                <div class="terminal-toolbar">
+                    <div class="terminal-title">
+                        <i class="fa-solid fa-terminal"></i> Terminal Output Stream
+                    </div>
+                    <div class="terminal-controls">
+                        <button class="term-btn" id="btnToggleFont"><i class="fa-solid fa-font"></i> Projector Font</button>
+                        <button class="term-btn" id="btnJumpBottom"><i class="fa-solid fa-arrow-down"></i> Jump to Latest</button>
+                        <button class="term-btn" id="btnCopyTerminal"><i class="fa-solid fa-copy"></i> Copy</button>
+                        <button class="term-btn" id="btnClearTerminal"><i class="fa-solid fa-trash"></i> Clear</button>
+                    </div>
+                </div>
+
+                <div class="terminal-window" id="terminalWindow">
+                    <div class="prompt-line" id="promptLine">$ fwagent run firmware_samples/cooling_fan_buggy --sim host</div>
+                    <pre class="terminal-content" id="terminalContent"></pre>
+                </div>
+            </section>
+
+            <!-- Action Toolbar & Report Controls -->
+            <section class="report-toolbar" id="reportToolbar">
+                <button class="btn btn-primary" id="btnToggleReportIframe"><i class="fa-solid fa-eye"></i> View Report HTML</button>
+                <a class="btn btn-secondary" id="btnDownloadReport" href="#" target="_blank" download><i class="fa-solid fa-file-arrow-down"></i> Download Report (HTML)</a>
+                <a class="btn btn-accent" id="btnDownloadZip" href="#" target="_blank" download><i class="fa-solid fa-file-zipper"></i> Download Run Folder (.zip)</a>
+            </section>
+
+            <!-- Embedded Report HTML Iframe Panel -->
+            <section class="iframe-container hidden" id="iframeContainer">
+                <iframe id="reportIframe" src="about:blank"></iframe>
+            </section>
+
+            <!-- Severity-Sorted Findings Cards Section -->
+            <section class="findings-section" id="findingsSection">
+                <h2><i class="fa-solid fa-bug"></i> High-Priority Findings & Root Cause Analysis</h2>
+                <div class="findings-grid" id="findingsGrid">
+                    <div class="empty-state">No findings loaded. Run a test cycle to inspect line-mapped firmware bugs.</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
