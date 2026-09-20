@@ -1,3 +1,1 @@
-# BlackBox FW-Agent
-
-Autonomous Embedded Firmware Testing Agent for Black Box Hackathon PS3.
+blank
