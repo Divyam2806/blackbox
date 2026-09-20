@@ -53,7 +53,7 @@ class RootCauseExplainer:
         # Check input unit & kind for domain-accurate fallback phrasing
         first_input = model.inputs[0] if (model and model.inputs) else None
         is_cm_sensor = first_input and first_input.unit == "cm"
-        has_timeout_error = any("timeout" in e.trigger.lower() or "timeout" in e.note.lower() for e in (model.error_paths or [])) if model else False
+        has_timeout_error = any("loop timeout" in e.trigger.lower() or "i/o timeout" in e.trigger.lower() for e in (model.error_paths or [])) if model else False
 
         # Check Finding F1: Sensor Faults / Plausibility Not Detected
         f1_failures = [
@@ -128,6 +128,7 @@ class RootCauseExplainer:
             ))
 
         # Check Finding F3: Output Chatter Near Threshold
+        clean_thresh_sig = input_name if ("millis" in thresh_sig.lower() or "time" in thresh_sig.lower() or "timer" in thresh_sig.lower()) else thresh_sig
         f3_warns = [
             v for v in verdicts
             if v.status == "WARN" or "I3" in v.rule_ids or "chattering" in v.observed.lower()
@@ -136,21 +137,35 @@ class RootCauseExplainer:
             ev_tests = [v.test_id for v in f3_warns]
             first_warn = f3_warns[0]
             dynamic_lines = get_localized_lines(first_warn, thresh_lines)
-            findings.append(Finding(
-                id="F3",
-                severity="Medium",
-                title=f"{output_name} control instability under noisy sensor input near {thresh_sig}",
-                evidence_tests=ev_tests,
-                evidence_lines=[f"{', '.join(ev_tests[:2])}: Output fluctuations recorded under noisy sensor readings"],
-                firmware_lines=dynamic_lines,
-                likely_cause=f"Direct output calculation from {thresh_sig} without low-pass deadband filtering causes output instability on noisy readings.",
-                suggested_fix=(
+            
+            if is_cm_sensor:
+                cause_text = f"Direct linear calculation of {output_name} from {clean_thresh_sig} without low-pass filtering causes single-sample sensor fluctuations to produce proportional control output jitter."
+                fix_text = (
+                    f"// Apply low-pass exponential moving average filter to {clean_thresh_sig}:\n"
+                    f"static float filtered_{clean_thresh_sig} = {thresh_val};\n"
+                    f"filtered_{clean_thresh_sig} = (filtered_{clean_thresh_sig} * 7 + {clean_thresh_sig} * 3) / 10;\n"
+                    f"// Calculate {output_name} using filtered_{clean_thresh_sig}"
+                )
+            else:
+                cause_text = f"Direct output calculation from {clean_thresh_sig} without low-pass deadband filtering causes output instability on noisy readings."
+                fix_text = (
                     f"// Add deadband filter for {output_name}:\n"
-                    f"if (abs({thresh_sig} - last_{thresh_sig}) > DEADBAND) {{\n"
+                    f"if (abs({clean_thresh_sig} - last_{clean_thresh_sig}) > DEADBAND) {{\n"
                     f"    // Update {output_name}\n"
                     f"}}"
                 )
+
+            findings.append(Finding(
+                id="F3",
+                severity="Medium",
+                title=f"{output_name} is directly sensitive to single-sample sensor fluctuations for {clean_thresh_sig}",
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:2])}: Output fluctuations recorded under noisy sensor readings"],
+                firmware_lines=dynamic_lines,
+                likely_cause=cause_text,
+                suggested_fix=fix_text
             ))
+
 
         # Check Finding F4: Boundary Ambiguity
         f4_ambiguous = [

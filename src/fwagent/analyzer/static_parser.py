@@ -178,23 +178,43 @@ class StaticParser:
                 # AST Rule 1: Assignment left-side receives return value of a function call
                 left_node = node.child_by_field_name("left")
                 right_node = node.child_by_field_name("right")
-                if left_node and right_node and right_node.type == "call_expression":
+                if left_node and right_node:
                     var_name = left_node.text.decode("utf-8", errors="ignore").strip()
                     line_no = node.start_point[0] + 1
-                    if not any(s.name == var_name for s in model.inputs):
-                        model.inputs.append(
-                            Signal(
-                                name=var_name,
-                                kind="adc",
-                                pin=var_name.upper(),
-                                unit="raw",
-                                valid_range=(0.0, 1023.0),
-                                line=line_no
+                    var_lower = var_name.lower()
+                    
+                    # Ignore system timing / protocol / intermediate calculation variables
+                    is_system_var = (
+                        "time" in var_lower
+                        or "timer" in var_lower
+                        or "millis" in var_lower
+                        or "micros" in var_lower
+                        or "tick" in var_lower
+                        or "stamp" in var_lower
+                        or "pitch" in var_lower
+                        or "trig" in var_lower
+                        or var_lower in ("len", "n", "buf", "msg", "ubrr", "i", "j")
+                    )
+
+                    right_text = right_node.text.decode("utf-8", errors="ignore").strip()
+                    is_timing_fn = any(tf in right_text.lower() for tf in ("millis", "micros", "delay", "mavlink"))
+
+                    if not is_system_var and not is_timing_fn and right_node.type == "call_expression":
+                        if not any(s.name == var_name for s in model.inputs):
+                            is_cm = "ping" in right_text.lower() or "sonar" in right_text.lower() or "dist" in var_lower or "sensor" in var_lower
+                            model.inputs.append(
+                                Signal(
+                                    name=var_name,
+                                    kind="adc",
+                                    pin=var_name.upper(),
+                                    unit="cm" if is_cm else "raw",
+                                    valid_range=(1.0, 70.0) if is_cm else (0.0, 1023.0),
+                                    line=line_no
+                                )
                             )
-                        )
 
             elif node.type == "binary_expression":
-                # AST Rule 3: Distinguish loop timeouts from domain thresholds via AST parent context
+                # AST Rule 3: Distinguish loop timeouts & timing checks from domain thresholds
                 op_node = node.child_by_field_name("operator")
                 left_node = node.child_by_field_name("left")
                 right_node = node.child_by_field_name("right")
@@ -205,7 +225,18 @@ class StaticParser:
                         right = right_node.text.decode("utf-8", errors="ignore").strip()
                         line_no = node.start_point[0] + 1
 
-                        # Check if this expression is inside a while/for loop and contains unary increment/decrement
+                        # Ignore timing comparison checks e.g. (millis() - HeartbeatTime) > 1000
+                        left_lower = left.lower()
+                        is_timing_check = (
+                            "millis" in left_lower
+                            or "micros" in left_lower
+                            or "heartbeattime" in left_lower
+                            or "time" in left_lower
+                            or "timer" in left_lower
+                            or "tick" in left_lower
+                        )
+
+                        # Check if inside loop and has mutation
                         is_in_loop = False
                         p = node.parent
                         while p:
@@ -217,7 +248,6 @@ class StaticParser:
                         has_mutation = left_node.type in ("update_expression", "unary_expression") or "++" in left or "--" in left
 
                         if is_in_loop and has_mutation:
-                            # It's an I/O wait loop timeout! Record as an error path
                             model.error_paths.append(
                                 ErrorPath(
                                     trigger="I/O loop timeout return 0",
@@ -225,7 +255,7 @@ class StaticParser:
                                     line=line_no
                                 )
                             )
-                        else:
+                        elif not is_timing_check:
                             clean_left = re.sub(r"^[+-]+|[+-]+$", "", left).strip()
                             val = None
                             if right in float_constants:
