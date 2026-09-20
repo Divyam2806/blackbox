@@ -33,7 +33,6 @@ class LLMGateway:
 
         if api_key and self.provider != "mock":
             try:
-                # Try calling OpenAI compatible gateway if key exists
                 import urllib.request
                 payload = {
                     "model": "gpt-4o-mini",
@@ -76,7 +75,6 @@ class LLMGateway:
         name = schema_class.__name__
 
         if name == "FirmwareModel":
-            # Extract static facts embedded in input_str if present
             static_facts = {}
             if "STATIC FACTS:" in input_str:
                 try:
@@ -134,6 +132,9 @@ class LLMGateway:
                 "line": 16,
             })
 
+            # Dynamically inherit log_patterns extracted by static parser (no hardcoded fan pattern fallback)
+            extracted_log_patterns = static_facts.get("log_patterns", [r".*"])
+
             return {
                 "firmware_name": fw_name,
                 "inputs": inputs,
@@ -142,7 +143,7 @@ class LLMGateway:
                 "states": ["OFF", "ON"],
                 "error_paths": error_paths,
                 "rules": rules,
-                "log_patterns": static_facts.get("log_patterns", [r"T=(?P<t>[-\d.]+) FAN=(?P<fan>ON|OFF)"]),
+                "log_patterns": extracted_log_patterns,
             }
 
         return {}

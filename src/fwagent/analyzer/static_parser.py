@@ -1,7 +1,7 @@
 """
 Static Parser for Embedded Firmware (C/C++/Arduino sketches).
 Extracts pin assignments, hardware primitives, threshold constants, line indices,
-and pin drive tracking without needing an LLM.
+dynamic serial log regex patterns, and pin drive tracking without needing an LLM.
 """
 
 import os
@@ -66,7 +66,6 @@ class StaticParser:
             if match:
                 pin_arg = match.group(1)
                 pin_str = pin_constants.get(pin_arg, (pin_arg, line_no))[0]
-                # Normalize pin (e.g. A0)
                 if not any(sig.name == "temp" or sig.pin == pin_str for sig in model.inputs):
                     model.inputs.append(
                         Signal(
@@ -115,7 +114,6 @@ class StaticParser:
                 )
             )
 
-            # If an output pin is never written, flag an unhandled error path / warning
             if not is_driven:
                 model.error_paths.append(
                     ErrorPath(
@@ -127,7 +125,6 @@ class StaticParser:
                 )
 
         # 4. Extract threshold comparison rules & constants
-        # e.g. if (t >= THRESH_C) or if (t >= 30.0)
         thresh_pattern = re.compile(r"if\s*\(\s*([A-Za-z0-9_.]+)\s*(>=|>|<=|<|==|!=)\s*([A-Za-z0-9_.]+)\s*\)")
         for line_no, line in enumerate(line_index.lines, start=1):
             line_clean = line.split("//")[0].strip()
@@ -153,10 +150,28 @@ class StaticParser:
                         )
                     )
 
-        # 5. Extract Serial log patterns
-        # Look for Serial.print("T="); ... Serial.print(" FAN="); ...
-        if "Serial.print" in content or "Serial.println" in content:
-            model.log_patterns.append(r"T=(?P<t>[-\d.]+) FAN=(?P<fan>ON|OFF)")
+        # 5. DYNAMIC Serial Log Pattern Extraction
+        # Scans Serial.print("KEY=") statements to dynamically assemble regex with named groups (?P<key>...)
+        serial_print_str_pattern = re.compile(r'Serial\.print(?:ln)?\s*\(\s*"([^"]+)"\s*\)')
+        serial_print_var_pattern = re.compile(r'Serial\.print(?:ln)?\s*\(\s*([A-Za-z0-9_]+(?:\s*\?\s*"[^"]+"\s*:\s*"[^"]+")?)\s*\)')
+        
+        extracted_tokens = []
+        for line in line_index.lines:
+            line_clean = line.split("//")[0].strip()
+            str_match = serial_print_str_pattern.findall(line_clean)
+            for s in str_match:
+                if "=" in s:
+                    key_name = s.replace("=", "").strip().lower()
+                    extracted_tokens.append((key_name, s))
+
+        if extracted_tokens:
+            regex_parts = []
+            for key_name, prefix in extracted_tokens:
+                regex_parts.append(rf"{prefix}(?P<{key_name}>[^\s,]+)")
+            combined_pattern = r"\s*".join(regex_parts)
+            model.log_patterns.append(combined_pattern)
+        else:
+            model.log_patterns.append(r".*")
 
         # 6. Default invariants
         model.rules.extend([
