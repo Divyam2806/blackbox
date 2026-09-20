@@ -62,7 +62,7 @@ class OracleEvaluator:
 
         # Check Universal Invariant I1 (Boot Safety) for state/boot tests
         if test_case.category == "state" and ("boot" in test_case.title.lower() or "reset" in test_case.title.lower()):
-            boot_ok, boot_msg = self.invariants.check_boot_safety(pin_trace, logs)
+            boot_ok, boot_msg = self.invariants.check_boot_safety(pin_trace, logs, model=self.model)
             if not boot_ok and not has_err_log:
                 return Verdict(
                     test_id=test_id,
@@ -74,9 +74,9 @@ class OracleEvaluator:
                     observed=boot_msg
                 )
 
-        # Check Universal Invariant I3 (Fan Chatter) for timing/chatter tests
+        # Check Universal Invariant I3 (Output Chatter) for timing/chatter tests
         if test_case.category == "timing" or "chatter" in test_case.title.lower() or "noise" in test_case.title.lower():
-            chatter_ok, toggle_count, chatter_msg = self.invariants.check_chatter(logs, max_toggles=3)
+            chatter_ok, toggle_count, chatter_msg = self.invariants.check_chatter(logs, max_toggles=3, model=self.model)
             if not chatter_ok:
                 return Verdict(
                     test_id=test_id,
@@ -96,7 +96,7 @@ class OracleEvaluator:
         )
 
         if is_fault_test:
-            plausible_ok, plausible_msg = self.invariants.check_plausible_data(test_case, pin_trace, logs)
+            plausible_ok, plausible_msg = self.invariants.check_plausible_data(test_case, pin_trace, logs, model=self.model)
             if not plausible_ok:
                 return Verdict(
                     test_id=test_id,

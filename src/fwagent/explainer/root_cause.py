@@ -55,6 +55,11 @@ class RootCauseExplainer:
         is_cm_sensor = first_input and first_input.unit == "cm"
         has_timeout_error = any("loop timeout" in e.trigger.lower() or "i/o timeout" in e.trigger.lower() for e in (model.error_paths or [])) if model else False
 
+        # Check if firmware is Assembly (.asm / .s) vs C/C++
+        is_asm = False
+        if model:
+            is_asm = any(s.pin and ("Addr_" in str(s.pin) or "Port_" in str(s.pin) or "Reg_" in str(s.pin)) for s in (model.inputs + model.outputs)) or "asm" in model.firmware_name.lower() or model.firmware_name.endswith(".asm")
+
         # Check Finding F1: Sensor Faults / Plausibility Not Detected
         f1_failures = [
             v for v in verdicts
@@ -65,7 +70,15 @@ class RootCauseExplainer:
             first_fail = f1_failures[0]
             dynamic_lines = get_localized_lines(first_fail, err_lines + input_lines + thresh_lines)
 
-            if has_timeout_error or is_cm_sensor:
+            if is_asm:
+                title_str = f"Unvalidated input operand {input_name} allows register overflow"
+                cause_str = f"{input_name} loads input data directly into register without CPI boundary limit validation (e.g., operand > 5 causes 8-bit accumulator overflow)."
+                fix_str = (
+                    f"; Add assembly input validation for {input_name}:\n"
+                    f"CPI  05H         ; Compare accumulator/input with upper bound\n"
+                    f"JNC  OVERFLOW    ; Jump to error handler if input exceeds safe limit"
+                )
+            elif has_timeout_error or is_cm_sensor:
                 title_str = f"Sensor measurement returns 0 on timeout, making failure indistinguishable from 0 reading for {input_name}"
                 cause_str = f"Measurement wait loop returns 0 on timeout (++timeout > 60000), which main loop processes as a valid 0 reading instead of flagging a fault."
                 fix_str = (
@@ -89,7 +102,6 @@ class RootCauseExplainer:
                     f"}}"
                 )
 
-
             findings.append(Finding(
                 id="F1",
                 severity="High",
@@ -110,21 +122,33 @@ class RootCauseExplainer:
             ev_tests = [v.test_id for v in f2_failures]
             first_fail = f2_failures[0]
             dynamic_lines = get_localized_lines(first_fail, err_lines + output_lines + thresh_lines)
-            findings.append(Finding(
-                id="F2",
-                severity="High",
-                title=f"Sensor failure is not explicitly detected or reported on {err_pin}",
-                evidence_tests=ev_tests,
-                evidence_lines=[f"{', '.join(ev_tests[:2])}: Sensor failure returns fallback value without notifying operator"],
-                firmware_lines=dynamic_lines,
-                likely_cause=f"Measurement failure on {input_name} triggers silent fallback ({output_name}) rather than explicitly reporting a fault state.",
-                suggested_fix=(
+            if is_asm:
+                title_str = f"Input fault condition is not explicitly checked on register/port {err_pin}"
+                cause_str = f"Execution on input {input_name} reaches halt without setting status flag or branching to error path."
+                fix_str = (
+                    f"; Check carry/fault flag and branch to error handler:\n"
+                    f"JC   ERROR_HANDLER ; Jump to error handler on carry/fault flag\n"
+                    f"HLT                ; Stop execution safely"
+                )
+            else:
+                title_str = f"Sensor failure is not explicitly detected or reported on {err_pin}"
+                cause_str = f"Measurement failure on {input_name} triggers silent fallback ({output_name}) rather than explicitly reporting a fault state."
+                fix_str = (
                     f"// Distinguish sensor failure from valid state and report fault:\n"
                     f"if (is_{input_name}_fault()) {{\n"
                     f"    // Explicit fail-safe state\n"
                     f"    {output_name} = SAFE_VALUE;\n"
                     f"}}"
                 )
+            findings.append(Finding(
+                id="F2",
+                severity="High",
+                title=title_str,
+                evidence_tests=ev_tests,
+                evidence_lines=[f"{', '.join(ev_tests[:2])}: Hardware processing returns fallback without notifying operator"],
+                firmware_lines=dynamic_lines,
+                likely_cause=cause_str,
+                suggested_fix=fix_str
             ))
 
         # Check Finding F3: Output Chatter Near Threshold
@@ -138,7 +162,15 @@ class RootCauseExplainer:
             first_warn = f3_warns[0]
             dynamic_lines = get_localized_lines(first_warn, thresh_lines)
             
-            if is_cm_sensor:
+            if is_asm:
+                cause_text = f"Direct output update of {output_name} from {clean_thresh_sig} without hysteresis comparison causes output flag chatter on boundary readings."
+                fix_text = (
+                    f"; Add assembly boundary check for {output_name}:\n"
+                    f"CPI  08H         ; Compare register count with threshold\n"
+                    f"JC   SKIP_UPDATE ; Skip register update if below threshold\n"
+                    f"MOV  A, D        ; Save final output count"
+                )
+            elif is_cm_sensor:
                 cause_text = f"Direct linear calculation of {output_name} from {clean_thresh_sig} without low-pass filtering causes single-sample sensor fluctuations to produce proportional control output jitter."
                 fix_text = (
                     f"// Apply low-pass exponential moving average filter to {clean_thresh_sig}:\n"

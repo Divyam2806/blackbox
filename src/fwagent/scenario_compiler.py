@@ -17,24 +17,25 @@ class ScenarioCompiler:
         compiled_actions.append({"op": "reset"})
 
         for step in test_case.steps:
+            target_name = step.target or "sensor_input"
             if step.action == "set_input":
                 compiled_actions.append({
                     "op": "set_input",
-                    "target": step.target or "temp",
+                    "target": target_name,
                     "value": step.value,
                     "at_ms": step.at_ms
                 })
             elif step.action == "inject_fault":
                 compiled_actions.append({
                     "op": "inject_fault",
-                    "target": step.target or "temp",
+                    "target": target_name,
                     "fault_type": str(step.value) if step.value else "open_circuit",
                     "at_ms": step.at_ms
                 })
             elif step.action == "clear_fault":
                 compiled_actions.append({
                     "op": "clear_fault",
-                    "target": step.target or "temp",
+                    "target": target_name,
                     "at_ms": step.at_ms
                 })
             elif step.action == "wait":
@@ -63,6 +64,8 @@ class ScenarioCompiler:
         last_val = 25.0
 
         for s in test_case.steps:
+            target_name = s.target or "sensor_input"
+            part_id = f"{target_name}1"
             if s.action == "set_input":
                 try:
                     val = float(s.value) if s.value is not None else 25.0
@@ -74,8 +77,8 @@ class ScenarioCompiler:
                 last_val = val
                 steps_list.append({
                     "set-control": {
-                        "part-id": "temp1",
-                        "control": "temperature",
+                        "part-id": part_id,
+                        "control": target_name,
                         "value": round(val, 2)
                     }
                 })
@@ -89,8 +92,8 @@ class ScenarioCompiler:
                     fault_val = last_val  # Stuck / frozen
                 steps_list.append({
                     "set-control": {
-                        "part-id": "temp1",
-                        "control": "temperature",
+                        "part-id": part_id,
+                        "control": target_name,
                         "value": fault_val
                     }
                 })
