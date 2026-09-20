@@ -127,3 +127,11 @@ class RunConfig(BaseModel):
     test_timeout_s: float = 10.0
     llm_provider: str = "mock"  # or openai, ollama, anthropic
     out_dir: Optional[str] = None
+
+
+class ObservedEvent(BaseModel):
+    t_ms: int
+    signal: str
+    value: Any
+    raw_log: str = ""
+
