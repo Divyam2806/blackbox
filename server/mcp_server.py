@@ -22,11 +22,33 @@ if str(PROJECT_ROOT / "src") not in sys.path:
 
 try:
     from mcp.server.mcpserver import MCPServer
-except ImportError:
+except (ImportError, ModuleNotFoundError):
     try:
-        from mcp.server.fastmcp import FastMCP as MCPServer
-    except ImportError:
-        raise ImportError("The 'mcp' Python package is required. Please install it with 'pip install mcp>=1.0.0'.")
+        import sys
+        import importlib
+        fastmcp_mod = importlib.import_module("mcp.server.fastmcp")
+        MCPServer = getattr(fastmcp_mod, "FastMCP", None)
+    except Exception:
+        MCPServer = None
+
+if MCPServer is None:
+    raise ImportError("The 'mcp' Python package is required. Please install it with 'pip install mcp>=1.0.0'.")
+
+try:
+    from mcp.server.transport_security import TransportSecuritySettings
+except ImportError:
+    TransportSecuritySettings = None
+
+
+def get_sse_app():
+    """Return configured Starlette SSE app with remote access enabled."""
+    kwargs = {}
+    if TransportSecuritySettings is not None:
+        kwargs["transport_security"] = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+    return mcp.sse_app(**kwargs)
+
 
 mcp = MCPServer("Gazebo-FWAgent-Server")
 
@@ -180,7 +202,7 @@ if __name__ == "__main__":
             f"http://{args.host}:{args.port}/sse ..."
         )
 
-        app = mcp.sse_app()
+        app = get_sse_app()
 
         from starlette.responses import JSONResponse
         from starlette.routing import Route

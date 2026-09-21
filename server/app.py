@@ -16,7 +16,8 @@ from pydantic import BaseModel
 
 from fastapi.staticfiles import StaticFiles
 
-# Ensure src is on sys.path
+# Ensure src and project root are on sys.path
+sys.path.insert(0, os.path.abspath("."))
 sys.path.insert(0, os.path.abspath("src"))
 
 app = FastAPI(
@@ -605,6 +606,20 @@ async def replay_run_stream(run_id: str):
 async def favicon():
     return Response(status_code=204)
 
+
+# Mount FastMCP SSE Remote Agent routes (/sse and /messages)
+try:
+    try:
+        from server.mcp_server import get_sse_app
+    except ImportError:
+        import importlib
+        mcp_module = importlib.import_module("server.mcp_server")
+        get_sse_app = getattr(mcp_module, "get_sse_app")
+    mcp_app = get_sse_app()
+    for route in mcp_app.routes:
+        app.routes.append(route)
+except Exception as e:
+    print(f"Warning: Could not mount FastMCP SSE routes: {e}")
 
 # Mount static web UI files at /
 static_dir = os.path.abspath("static")
