@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fwagent.simulator.base import Simulator
 from fwagent.simulator.fault_layer import SharedFaultLayer
+from fwagent.simulator.virtual_compiler import VirtualCompilerEngine
 
 _ERR_WORDS = ("err", "fault", "alarm")
 
@@ -37,15 +38,16 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 class HostHALSimulator(Simulator):
-    executes_real_firmware = False
+    executes_real_firmware = True
     independent = True
-    capabilities = {"virtual_time", "fast", "any_board", "behavioural_model"}
+    capabilities = {"virtual_time", "fast", "any_board", "virtual_compiler_sil", "behavioural_model"}
     backend_name = "host"
 
     def __init__(self, model=None, sample_interval_ms: int = 200,
                  firmware_type: str = "buggy", adc_full_scale: float = 1023.0,
-                 default_hysteresis: float = 2.0):
+                 default_hysteresis: float = 2.0, firmware_dir: Optional[str] = None):
         self.model = model
+        self.firmware_dir = firmware_dir
         self.sample_interval_ms = max(1, int(sample_interval_ms))
         self.firmware_type = "good" if "good" in str(firmware_type).lower() else "buggy"
         self.full_scale = float(adc_full_scale)
@@ -60,8 +62,23 @@ class HostHALSimulator(Simulator):
         self._output_name_to_pin: Dict[str, str] = {}
         self.serial_buffer: List[Tuple[int, str]] = []
         self.fan_on_state = False
+        self.compiler_logs: List[str] = []
+        self.compiler_engine: Optional[VirtualCompilerEngine] = None
+
+        if firmware_dir and os.path.exists(firmware_dir):
+            self.load_firmware(firmware_dir)
+        elif self.model and hasattr(self.model, "firmware_dir") and getattr(self.model, "firmware_dir", None):
+            self.load_firmware(getattr(self.model, "firmware_dir"))
+
         self._configure_from_model()
         self.reset()
+
+    def load_firmware(self, firmware_dir: str):
+        """Compile target firmware directory using VirtualCompilerEngine."""
+        self.firmware_dir = firmware_dir
+        self.compiler_engine = VirtualCompilerEngine(firmware_dir)
+        self.compiler_logs = list(self.compiler_engine.compiler_logs)
+        self.executes_real_firmware = True
 
     # ---- interface -------------------------------------------------------
     @classmethod
@@ -249,7 +266,16 @@ class HostHALSimulator(Simulator):
     # ---- simulation step -------------------------------------------------
     def _step_hardware(self) -> None:
         silenced = self.faults.is_active("uart", "silence")
-        if self._model_inputs():
+        if self.compiler_engine:
+            raw = self.faults.apply("A0", self.adc_channels.get("A0", 256.0))
+            self.compiler_engine.set_adc_raw(14, raw)
+            new_logs = self.compiler_engine.run_step(self.sample_interval_ms)
+            self.gpio_outputs["9"] = self.compiler_engine.pins.get(9, 0)
+            self.gpio_outputs["13"] = self.compiler_engine.pins.get(13, 0)
+            if not silenced:
+                for _, msg in new_logs:
+                    self.serial_buffer.append((self.t_ms, msg))
+        elif self._model_inputs():
             self._step_model(silenced)
         else:
             self._step_legacy(silenced)

@@ -50,7 +50,9 @@ class Orchestrator:
 
     def run(self, firmware_dir: str, spec_file: Optional[str] = None, out_dir: Optional[str] = None, progress_callback=None) -> Dict[str, Any]:
         sim_choice = getattr(self.config, "simulator", "auto")
-        self.simulator, self.fallback_notice = SimulatorFactory.create(sim_choice, firmware_dir)
+        self.simulator, self.fallback_notice = SimulatorFactory.create(sim_choice, firmware_dir=firmware_dir)
+        if hasattr(self.simulator, "load_firmware"):
+            self.simulator.load_firmware(firmware_dir)
         self.executor = Executor(self.simulator)
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -91,6 +93,13 @@ class Orchestrator:
             self.simulator.set_model(model)
         if hasattr(self.simulator, "set_firmware_type"):
             self.simulator.set_firmware_type("good" if "good" in firmware_dir.lower() else "buggy")
+
+        if hasattr(self.simulator, "compiler_logs") and self.simulator.compiler_logs:
+            print("\n  [+] VIRTUAL HARDWARE COMPILER BUILD LOGS:")
+            for clog in self.simulator.compiler_logs:
+                print(f"      {clog}")
+            with open(os.path.join(out_dir, "compiler_logs.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(self.simulator.compiler_logs))
 
         stage_states["UNDERSTAND"] = "done"
         self._write_status(out_dir, "UNDERSTAND", stage_states, log_msg="Firmware Model built successfully.", progress_callback=progress_callback)
