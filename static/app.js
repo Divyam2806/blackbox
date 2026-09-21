@@ -35,8 +35,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnCopyText = document.getElementById('btn-copy-text');
   const btnClearLog = document.getElementById('btn-clear-log');
   const btnSaveLog = document.getElementById('btn-save-log');
-  const btnProjectorToggle = document.getElementById('btn-projector-toggle');
-  const btnProjectorHeader = document.getElementById('btnProjectorHeader');
   const btnJumpLatest = document.getElementById('btn-jump-latest');
 
   const scPass = document.getElementById('scPass');
@@ -193,22 +191,6 @@ document.addEventListener('DOMContentLoaded', () => {
     a.click();
     URL.revokeObjectURL(url);
   });
-
-  function toggleProjectorMode() {
-    isProjectorMode = !isProjectorMode;
-    if (isProjectorMode) {
-      terminalScreen.classList.remove('text-xs', 'leading-[20px]');
-      terminalScreen.classList.add('text-base', 'leading-[26px]');
-      btnProjectorToggle.classList.add('bg-surface-container-high', 'border-primary-container');
-    } else {
-      terminalScreen.classList.add('text-xs', 'leading-[20px]');
-      terminalScreen.classList.remove('text-base', 'leading-[26px]');
-      btnProjectorToggle.classList.remove('bg-surface-container-high', 'border-primary-container');
-    }
-  }
-
-  btnProjectorToggle.addEventListener('click', toggleProjectorMode);
-  btnProjectorHeader.addEventListener('click', toggleProjectorMode);
 
   // Scoreboard Filtering Logic
   document.querySelectorAll('.filter-chip').forEach(chip => {
