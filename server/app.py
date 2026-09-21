@@ -40,8 +40,10 @@ RUN_PROCESSES: Dict[str, Dict[str, Any]] = {}
 PROCESS_LOCK = threading.Lock()
 
 
-def sanitize_filename(filename: str) -> str:
+def sanitize_filename(filename: Optional[str]) -> str:
     """Strip dangerous path components to prevent path traversal."""
+    if not filename:
+        return ""
     filename = os.path.basename(filename)
     filename = filename.replace("..", "").replace("/", "").replace("\\", "")
     return filename
@@ -88,15 +90,16 @@ def run_agent_subprocess(run_id: str, firmware_dir: str, spec_file: Optional[str
                 RUN_PROCESSES[run_id]["process"] = proc
 
         # Read stdout line by line
-        for line in iter(proc.stdout.readline, ''):
-            if not line:
-                break
-            line_str = line.strip()
-            with PROCESS_LOCK:
-                if run_id in RUN_PROCESSES:
-                    RUN_PROCESSES[run_id]["logs"].append(line_str)
+        if proc.stdout:
+            for line in iter(proc.stdout.readline, ''):
+                if not line:
+                    break
+                line_str = line.strip()
+                with PROCESS_LOCK:
+                    if run_id in RUN_PROCESSES:
+                        RUN_PROCESSES[run_id]["logs"].append(line_str)
 
-        proc.stdout.close()
+            proc.stdout.close()
         return_code = proc.wait()
 
         with PROCESS_LOCK:
@@ -244,6 +247,9 @@ async def create_run(
             if total_size > 20 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="Total upload size exceeds 20 MB limit")
             
+            if not upload_f.filename:
+                continue
+
             clean_name = sanitize_filename(upload_f.filename)
             if not clean_name:
                 continue
