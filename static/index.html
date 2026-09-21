@@ -189,30 +189,8 @@
 
   <!-- Main Workspace Pane -->
   <div class="pl-[260px]">
-    <!-- Top Header Strip -->
-    <header class="fixed top-0 left-[260px] right-0 h-14 bg-surface-container-lowest border-b border-outline-variant z-40 flex items-center justify-between px-6">
-      <div class="flex items-center gap-space-lg">
-        <nav class="flex items-center gap-6">
-          <a class="text-sm font-semibold text-on-surface border-b-2 border-primary-container pb-0.5" href="#">Test Runner</a>
-          <a class="text-sm text-on-surface-variant hover:text-on-surface transition-colors" href="#">Register Monitor</a>
-          <a class="text-sm text-on-surface-variant hover:text-on-surface transition-colors" href="#">Trace Logs</a>
-          <a class="text-sm text-on-surface-variant hover:text-on-surface transition-colors" href="#">Bench Settings</a>
-        </nav>
-      </div>
-      <div class="flex items-center gap-space-md">
-        <button id="btnProjectorHeader" class="flex items-center gap-1.5 px-3 py-1 border border-outline-variant rounded-[3px] bg-surface hover:bg-surface-container-low text-on-surface text-xs transition-colors" type="button">
-          <span class="material-symbols-outlined text-[16px] text-on-surface-variant">tv</span>
-          <span>Projector Mode</span>
-        </button>
-        <div class="h-4 w-[1px] bg-outline-variant"></div>
-        <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-          <span class="material-symbols-outlined text-on-primary text-[18px]">person</span>
-        </div>
-      </div>
-    </header>
-
     <!-- Main Content Container -->
-    <main class="relative pt-14 bg-surface min-h-screen">
+    <main class="relative pt-4 bg-surface min-h-screen">
       <div class="max-w-[1100px] mx-auto p-6 space-y-6 text-on-surface">
 
         <!-- 1. Run Header & Stage Pipeline Line -->
@@ -227,6 +205,10 @@
               </div>
             </div>
             <div class="flex items-center gap-2">
+              <button id="btnProjectorHeader" class="flex items-center gap-1.5 px-2.5 py-1.5 border border-outline-variant rounded-[3px] bg-surface-container-lowest hover:bg-surface-container-low text-on-surface text-xs transition-colors" type="button">
+                <span class="material-symbols-outlined text-[15px] text-on-surface-variant">tv</span>
+                <span>Projector</span>
+              </button>
               <button id="btnStop" class="flex items-center gap-1 px-3 py-1.5 border border-error text-error hover:bg-error hover:text-on-error rounded-[3px] text-xs font-semibold transition-colors disabled:opacity-50 disabled:pointer-events-none" type="button" disabled>
                 <span class="material-symbols-outlined text-[16px]">stop</span>
                 <span>Stop</span>
