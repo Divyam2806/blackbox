@@ -154,6 +154,9 @@ if __name__ == "__main__":
     # Auto-detect cloud environment (Render / Heroku / Railway) or explicit --sse flag
     if args.sse or os.environ.get("RENDER") or "PORT" in os.environ:
         print(f"Starting MCP Server in SSE mode on http://{args.host}:{args.port}/sse ...")
+        # Configure the MCP server to listen on Render's port
+        os.environ["MCP_HOST"] = args.host
+        os.environ["MCP_PORT"] = str(args.port)
         mcp.run(transport="sse")
     else:
         mcp.run()
