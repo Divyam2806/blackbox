@@ -300,6 +300,40 @@
           </div>
         </section>
 
+        <!-- Section 1: LLM Generated Test Cases & Verification Plan -->
+        <section class="flex flex-col bg-surface-container-lowest border border-outline-variant rounded-[3px]">
+          <div class="px-4 py-3 border-b border-outline-variant bg-surface-container-low flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary-container text-[20px]">psychology</span>
+              <div>
+                <h2 class="text-sm font-bold text-on-surface">1. LLM Generated Test Cases & Verification Plan (Stage P)</h2>
+                <span class="font-mono text-[11px] text-on-surface-variant">Generated dynamically after analyzing code AST & semantic specification</span>
+              </div>
+            </div>
+            <span class="px-2.5 py-0.5 border border-primary-container text-primary-container font-mono text-[10px] font-bold rounded-[3px]">⚡ LLM Generated</span>
+          </div>
+          <div id="llmTestCasesContainer" class="p-4 grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[360px] overflow-y-auto bg-surface font-mono text-xs">
+            <div class="text-on-surface-variant text-xs col-span-2">Run test engine to view LLM-generated dynamic test cases.</div>
+          </div>
+        </section>
+
+        <!-- Section 2: Host CPU Compiler & Virtual Hardware Build Logs -->
+        <section class="flex flex-col bg-surface-container-lowest border border-outline-variant rounded-[3px]">
+          <div class="px-4 py-3 border-b border-outline-variant bg-surface-container-low flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="material-symbols-outlined text-secondary text-[20px]">memory</span>
+              <div>
+                <h2 class="text-sm font-bold text-on-surface">2. Host CPU Compiler & Virtual Hardware Build Logs</h2>
+                <span class="font-mono text-[11px] text-on-surface-variant">Host SIL C++ Hardware Compilation & Symbol Binding Engine</span>
+              </div>
+            </div>
+            <span id="compilerStatusBadge" class="px-2 py-0.5 border border-secondary text-secondary font-mono text-[10px] font-bold rounded-[3px]">BUILD READY</span>
+          </div>
+          <div class="p-3 bg-[#090d16] font-mono text-xs text-[#38bdf8] max-h-[220px] overflow-y-auto select-text border-t border-outline-variant">
+            <pre id="compilerLogsPre" class="m-0 leading-[18px]">System ready. Trigger run to start C++ virtual hardware compilation.</pre>
+          </div>
+        </section>
+
         <!-- 3. Scoreboard Chips Line -->
         <section class="flex flex-wrap items-center justify-between gap-4 py-2 border-b border-outline-variant">
           <div class="flex items-center gap-2 font-mono text-xs select-none">

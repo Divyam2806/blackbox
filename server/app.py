@@ -441,6 +441,24 @@ def get_run_summary(run_id: str):
         with open(status_file, "r", encoding="utf-8") as f:
             status_data = json.load(f)
 
+    test_plan = []
+    test_plan_file = os.path.join(run_dir, "test_plan.json")
+    if os.path.exists(test_plan_file):
+        try:
+            with open(test_plan_file, "r", encoding="utf-8") as f:
+                test_plan = json.load(f)
+        except Exception:
+            pass
+
+    compiler_logs = []
+    compiler_logs_file = os.path.join(run_dir, "compiler_logs.txt")
+    if os.path.exists(compiler_logs_file):
+        try:
+            with open(compiler_logs_file, "r", encoding="utf-8") as f:
+                compiler_logs = [line.strip() for line in f.readlines() if line.strip()]
+        except Exception:
+            pass
+
     scoreboard = {
         "TOTAL": len(verdicts),
         "PASS": sum(1 for v in verdicts if v.get("status") == "PASS"),
@@ -451,11 +469,13 @@ def get_run_summary(run_id: str):
 
     return {
         "run_id": run_id,
+        "status": status_data,
         "scoreboard": scoreboard,
+        "verdicts": verdicts,
         "findings": findings,
         "suggestions": suggestions,
-        "verdicts": verdicts,
-        "status": status_data
+        "test_plan": test_plan,
+        "compiler_logs": compiler_logs
     }
 
 
