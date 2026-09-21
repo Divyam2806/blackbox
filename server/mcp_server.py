@@ -182,6 +182,22 @@ if __name__ == "__main__":
 
         app = mcp.sse_app()
 
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        async def root_status(request):
+            return JSONResponse({
+                "status": "online",
+                "service": "BlackBox FW-Agent & Gazebo Simulation MCP Server",
+                "transport": "HTTP/SSE",
+                "sse_endpoint": "/sse",
+                "messages_endpoint": "/messages",
+                "mcp_version": "1.0.0",
+                "note": "Connect remote AI agents to /sse endpoint"
+            })
+
+        app.routes.append(Route("/", endpoint=root_status, methods=["GET"]))
+
         uvicorn.run(
             app,
             host=args.host,
@@ -190,3 +206,4 @@ if __name__ == "__main__":
 
     else:
         mcp.run()
+
