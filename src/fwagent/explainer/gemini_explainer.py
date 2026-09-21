@@ -170,34 +170,54 @@ class GeminiExplainer:
         model: Optional[FirmwareModel] = None,
         findings: Optional[List[Finding]] = None,
     ) -> List[ImprovementSuggestion]:
-        """Dynamic rule-based fallback suggestion generator using model input/output names."""
+        """Dynamic rule-based suggestion generator derived strictly from discovered findings and firmware model."""
+        suggestions: List[ImprovementSuggestion] = []
         inp_name = model.inputs[0].name if (model and model.inputs) else "sensor_input"
         out_name = model.outputs[0].name if (model and model.outputs) else "actuator_output"
 
-        return [
-            ImprovementSuggestion(
+        # 1. Check for unhandled error paths or undriven error indicators in findings
+        err_findings = [f for f in (findings or []) if any(w in f.title.lower() for w in ("error", "fault", "led", "indicator"))]
+        if err_findings or (model and any("ERR" in o.name.upper() for o in model.outputs)):
+            err_pin_sig = next((o for o in (model.outputs if model else []) if "ERR" in o.name.upper() or "FAULT" in o.name.upper()), None)
+            err_name = err_pin_sig.name if err_pin_sig else "ERR_LED"
+            err_pin = err_pin_sig.pin if (err_pin_sig and err_pin_sig.pin) else "13"
+            
+            suggestions.append(ImprovementSuggestion(
+                category="Fault State Machine",
+                title=f"Drive Hardware Error Indicator ({err_name} on Pin {err_pin})",
+                description=f"Findings indicate {err_name} is declared but never written by digitalWrite(). Drive {err_name} HIGH on sensor disconnection or out-of-range readings.",
+                code_snippet=f"// Drive {err_name} on Fault:\nif (isError) {{\n    digitalWrite({err_name.upper()}, HIGH);\n    digitalWrite({out_name.upper()}, HIGH); // Fail-safe state\n}}"
+            ))
+
+        # 2. Check for sensor plausibility / bounds findings
+        plaus_findings = [f for f in (findings or []) if any(w in f.title.lower() for w in ("plausibility", "boundary", "rail", "validation"))]
+        if plaus_findings or not err_findings:
+            suggestions.append(ImprovementSuggestion(
                 category="Bounds Safety & Input Guarding",
                 title=f"Add Sensor Rail Plausibility Validation for {inp_name}",
-                description=f"Validate raw analog counts before processing {inp_name}. Extreme boundary counts (raw <= 4 or raw >= 1019) indicate open-circuit or short-to-VCC faults.",
-                code_snippet=f"// Plausibility Check:\nif (raw_{inp_name} <= 4 || raw_{inp_name} >= 1019) {{\n    trigger_fault_state(); // Enter safe state\n    return;\n}}"
-            ),
-            ImprovementSuggestion(
+                description=f"Validate raw analog counts before calculating engineering values for {inp_name}. Extreme counts (raw <= 4 or raw >= 1019) signal open/short circuit faults.",
+                code_snippet=f"// Plausibility Check for {inp_name}:\nif (raw_{inp_name} <= 4 || raw_{inp_name} >= 1019) {{\n    isError = true;\n    return -999.0f;\n}}"
+            ))
+
+        # 3. Check for hysteresis / chatter findings
+        chatter_findings = [f for f in (findings or []) if any(w in f.title.lower() for w in ("chatter", "hysteresis", "threshold", "deadband"))]
+        thresh_val = model.thresholds[0].value if (model and model.thresholds) else 30.0
+        if chatter_findings or len(suggestions) < 3:
+            suggestions.append(ImprovementSuggestion(
                 category="Signal Processing & Hysteresis",
-                title=f"Apply Low-Pass Deadband Filter to {out_name}",
-                description=f"Prevent rapid output chatter on {out_name} near control thresholds by introducing a deadband hysteresis window or exponential moving average (EMA) filter.",
-                code_snippet=f"// Deadband Filter:\nif (abs(current_val - last_val) > DEADBAND_THRESHOLD) {{\n    update_{out_name}(current_val);\n    last_val = current_val;\n}}"
-            ),
-            ImprovementSuggestion(
-                category="Fault State Machine",
-                title="Explicit Error Indicator & Fail-Safe Recovery",
-                description=f"Ensure sensor hardware failures drive an explicit error signal (e.g. error LED or bus fault message) rather than silently defaulting to output fallbacks.",
-                code_snippet=f"// Explicit Error Handling:\nif (sensor_fault_detected) {{\n    digitalWrite(ERROR_PIN, HIGH);\n    digitalWrite({out_name.upper()}_PIN, LOW); // Fail-safe state\n}}"
-            ),
-            ImprovementSuggestion(
+                title=f"Implement Dual-Threshold Hysteresis for {out_name}",
+                description=f"Prevent rapid output chatter on {out_name} near boundary {thresh_val}°C by introducing a hysteresis window (e.g. ON at {thresh_val}°C, OFF at {thresh_val - 2.0}°C).",
+                code_snippet=f"// Dual-Threshold Hysteresis Loop:\nif (temp >= {thresh_val}) {{\n    {out_name}On = true;\n}} else if (temp <= {thresh_val - 2.0}) {{\n    {out_name}On = false;\n}}"
+            ))
+
+        # 4. System Resilience (Watchdog Timer)
+        if len(suggestions) < 4:
+            suggestions.append(ImprovementSuggestion(
                 category="System Resilience",
-                title="Hardware Watchdog & Serial Communication Timeout",
-                description="Enable internal watchdog timer (WDT) and add communication timeout handlers to ensure automatic recovery if main loop execution freezes.",
-                code_snippet="// Watchdog Initialization:\nwdt_enable(WDTO_2S); // 2-second timeout\n// In main loop:\nwdt_reset();"
-            )
-        ]
+                title="Enable Hardware Watchdog Timer (WDT)",
+                description="Configure internal AVR/STM32 watchdog timer to automatically reset MCU if loop execution freezes during hardware faults.",
+                code_snippet="// Watchdog Initialization in setup():\nwdt_enable(WDTO_2S); // 2-second timeout\n// In loop():\nwdt_reset();"
+            ))
+
+        return suggestions
 

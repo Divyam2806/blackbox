@@ -16,8 +16,8 @@ from fwagent.utils.lineindex import LineIndex
 
 # Optional tree-sitter-c dependency
 try:
-    import tree_sitter_c as _tsc
-    from tree_sitter import Language as _TSLanguage, Parser as _TSParser, Node as _TSNode
+    import tree_sitter_c as _tsc  # type: ignore
+    from tree_sitter import Language as _TSLanguage, Parser as _TSParser, Node as _TSNode  # type: ignore
     _C_LANG = _TSLanguage(_tsc.language())
     _TS_AVAILABLE = True
 except Exception:

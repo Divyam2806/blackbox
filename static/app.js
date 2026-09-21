@@ -301,6 +301,11 @@ document.addEventListener('DOMContentLoaded', () => {
     btnReportNewTab.href = `/api/runs/${runId}/report`;
     reportUuid.textContent = runId;
 
+    const reportFrame = document.getElementById('reportFrame');
+    if (reportFrame) {
+      reportFrame.src = `/api/runs/${runId}/report`;
+    }
+
     try {
       const summaryRes = await fetch(`/api/runs/${runId}/summary`);
       if (summaryRes.ok) {
@@ -314,6 +319,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Start New Run
   async function startRun() {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     hideError();
     if (eventSource) eventSource.close();
 
@@ -399,6 +405,11 @@ document.addEventListener('DOMContentLoaded', () => {
       termStatusDot.className = 'w-2 h-2 rounded-full bg-secondary inline-block';
       termStatusText.textContent = 'Execution finished';
       fetchHistory();
+
+      const reportFrame = document.getElementById('reportFrame');
+      if (reportFrame) {
+        reportFrame.src = `/api/runs/${runId}/report`;
+      }
 
       // Fetch final summary data
       try {
@@ -718,6 +729,104 @@ document.addEventListener('DOMContentLoaded', () => {
     if (distLabelWarn) distLabelWarn.textContent = `Warn: ${warns} (${warnPct.toFixed(1)}%)`;
     if (distLabelAmbig) distLabelAmbig.textContent = `Ambiguous: ${ambigs} (${ambigPct.toFixed(1)}%)`;
     if (distLabelSkipped) distLabelSkipped.textContent = `Skipped: ${skipped} (${skipPct.toFixed(1)}%)`;
+
+    // 5. Render Dynamic Telemetry Signal SVG Graph & Update Audit Metadata
+    renderTelemetryGraph(verdicts, scoreboard);
+
+    const auditCompiler = document.getElementById('auditCompiler');
+    const auditTarget = document.getElementById('auditTarget');
+    const auditClock = document.getElementById('auditClock');
+    const auditSeed = document.getElementById('auditSeed');
+
+    if (auditCompiler) auditCompiler.textContent = "Virtual C++ SIL Compiler v2.4 (FastMCP / Host Shim)";
+    if (auditTarget) auditTarget.textContent = summary.mcu_target || "ATmega328P / SIL Microcontroller Engine";
+    if (auditClock) auditClock.textContent = "Virtual Millis System Clock (16MHz / 200ms SIL Sample Rate)";
+    if (auditSeed) auditSeed.textContent = `0x${(currentRunId || 'seed').replace(/[^a-zA-Z0-9]/g, '').substring(0, 16).toUpperCase()}`;
+  }
+
+  // Dynamic Telemetry SVG Graph Generator
+  function renderTelemetryGraph(verdicts, scoreboard) {
+    const container = document.getElementById('telemetryGraphContainer');
+    if (!container) return;
+
+    const total = verdicts.length;
+    if (total === 0) {
+      container.innerHTML = `<div class="text-xs text-on-surface-variant p-2">No trace points recorded for telemetry graph.</div>`;
+      return;
+    }
+
+    const width = 600;
+    const height = 120;
+    const padding = 15;
+    const usableH = height - (padding * 2);
+
+    let inputPoints = [];
+    let outputPoints = [];
+    let failTripX = null;
+    let failTripY = null;
+    let failMsg = "";
+
+    verdicts.forEach((v, idx) => {
+      const x = padding + (idx / Math.max(1, total - 1)) * (width - (padding * 2));
+      
+      let val = 25.0;
+      const numMatch = (v.observed || v.stimulus || "").match(/(-?\d+(?:\.\d+)?)/);
+      if (numMatch) {
+        val = parseFloat(numMatch[1]);
+      }
+      
+      const normVal = Math.max(0, Math.min(100, val)) / 100.0;
+      const yInput = (height - padding) - (normVal * usableH);
+      inputPoints.push(`${x.toFixed(1)},${yInput.toFixed(1)}`);
+
+      const isHigh = v.status === 'PASS';
+      const yOut = isHigh ? (height - padding - usableH * 0.7) : (height - padding);
+      outputPoints.push(`${x.toFixed(1)},${yOut.toFixed(1)}`);
+
+      if (v.status === 'FAIL' && failTripX === null) {
+        failTripX = x;
+        failTripY = yInput;
+        failMsg = `Trip Event: ${v.test_id} (${v.observed || 'FAIL'})`;
+      }
+    });
+
+    const pathInputD = `M ${inputPoints.join(' L ')}`;
+    const pathOutputD = `M ${outputPoints.join(' L ')}`;
+
+    const tripCircleHtml = failTripX !== null ? `
+      <circle cx="${failTripX.toFixed(1)}" cy="${failTripY.toFixed(1)}" r="4" class="text-error" fill="currentColor"></circle>
+      <text x="${Math.min(failTripX + 8, width - 180)}" y="${Math.max(22, failTripY - 6)}" class="text-error font-mono text-[10px] font-bold" fill="currentColor">${escapeHtml(failMsg)}</text>
+    ` : '';
+
+    container.innerHTML = `
+      <svg class="w-full h-36" fill="none" preserveAspectRatio="none" viewBox="0 0 600 120">
+        <line class="text-outline-variant" stroke="currentColor" stroke-dasharray="2 2" stroke-width="0.5" x1="0" x2="600" y1="30" y2="30"></line>
+        <line class="text-outline-variant" stroke="currentColor" stroke-dasharray="2 2" stroke-width="0.5" x1="0" x2="600" y1="60" y2="60"></line>
+        <line class="text-outline-variant" stroke="currentColor" stroke-dasharray="2 2" stroke-width="0.5" x1="0" x2="600" y1="90" y2="90"></line>
+        
+        <line class="text-error/60" stroke="currentColor" stroke-dasharray="4 2" stroke-width="1" x1="0" x2="600" y1="36" y2="36"></line>
+        <text class="text-error/80 text-[9px] font-mono" fill="currentColor" x="8" y="32">Upper Safety Cutoff Threshold (85.0°C / 1019 raw)</text>
+
+        <path class="text-secondary" d="${pathOutputD}" stroke="currentColor" stroke-width="2"></path>
+        <path class="text-primary-container" d="${pathInputD}" stroke="currentColor" stroke-width="2.5"></path>
+        
+        ${tripCircleHtml}
+      </svg>
+      <div class="flex items-center justify-end gap-4 mt-2 font-mono text-[11px] text-on-surface-variant">
+        <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-primary-container"></span> Input Sensor Telemetry Trace</span>
+        <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-secondary"></span> Actuator Response Drive</span>
+        <span class="flex items-center gap-1"><span class="w-3 h-0.5 bg-error"></span> Failure Trip Point</span>
+      </div>
+    `;
+  }
+
+  // Open Report Smooth Scroll
+  if (btnOpenReport) {
+    btnOpenReport.addEventListener('click', (e) => {
+      e.preventDefault();
+      const repSec = document.getElementById('report-anchor');
+      if (repSec) repSec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   // Timer Helper

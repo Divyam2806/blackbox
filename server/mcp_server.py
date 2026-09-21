@@ -144,19 +144,49 @@ def get_latest_report_resource() -> str:
 
 if __name__ == "__main__":
     import argparse
+    import uvicorn
+
     default_port = int(os.environ.get("PORT", 8001))
-    parser = argparse.ArgumentParser(description="BlackBox FW-Agent MCP Server")
-    parser.add_argument("--sse", action="store_true", help="Run in HTTP/SSE transport mode for remote agent calls")
-    parser.add_argument("--host", default="0.0.0.0", help="Host address for HTTP/SSE server (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=default_port, help=f"Port for HTTP/SSE server (default: {default_port})")
+
+    parser = argparse.ArgumentParser(
+        description="BlackBox FW-Agent MCP Server"
+    )
+
+    parser.add_argument(
+        "--sse",
+        action="store_true",
+        help="Run in HTTP/SSE transport mode"
+    )
+
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host address for HTTP/SSE server"
+    )
+
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port,
+        help=f"Port for HTTP/SSE server (default: {default_port})"
+    )
+
     args = parser.parse_args()
 
-    # Auto-detect cloud environment (Render / Heroku / Railway) or explicit --sse flag
     if args.sse or os.environ.get("RENDER") or "PORT" in os.environ:
-        print(f"Starting MCP Server in SSE mode on http://{args.host}:{args.port}/sse ...")
-        # Configure the MCP server to listen on Render's port
-        os.environ["MCP_HOST"] = args.host
-        os.environ["MCP_PORT"] = str(args.port)
-        mcp.run(transport="sse")
+
+        print(
+            f"Starting MCP Server in SSE mode on "
+            f"http://{args.host}:{args.port}/sse ..."
+        )
+
+        app = mcp.sse_app()
+
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port
+        )
+
     else:
         mcp.run()

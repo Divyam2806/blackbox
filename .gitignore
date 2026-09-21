@@ -12,4 +12,5 @@ Makefile.env
 logs/
 uploads/
 scratch/
+*.shm
 

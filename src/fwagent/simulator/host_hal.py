@@ -19,6 +19,7 @@ Fixes over the earlier version:
   * numeric inputs are ambiguous (degrees or counts?). Use "raw:307" or
     "eng:125" to be explicit; plain numbers keep the old auto rule.
 """
+import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from fwagent.simulator.base import Simulator
